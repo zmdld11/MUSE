@@ -1,0 +1,58 @@
+# IDE / Editor
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+MUSE.code-workspace
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Environment
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Data and Models
+data/
+output/
+model/*.pth
+model/*.pt
+model/*.h5
+model/*.onnx
+model/*.pb
+model/*.ckpt
+
+# Only keep markdown and logs
+!model/log/
+!markdown/
+
+# Logs
+*.log
