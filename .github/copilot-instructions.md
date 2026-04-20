@@ -18,4 +18,4 @@
 - Progress Visualization: Include a visual progress bar (e.g., tqdm) during training.
 - Time Efficiency: During design/debugging, ensure each epoch takes <= 5 minutes (adjust batch size/dataloaders).
 - Persistent Logging: Automatically generate timestamped log files (e.g., 20260420-153022.log) in the module's model/log/ directory. Record metrics (Loss, Accuracy, SDR, etc.) per epoch.
-- Checkpointing: Code MUST support resuming training natively (periodically saving and loading checkpoints that include epoch and optimizer_state).
+- Checkpointing: Code MUST support resuming training natively (periodically saving and loading checkpoints that include `epoch` and `optimizer_state`). Additionally, the model with the best performance must be saved as `best_model.pth` and uploaded.
