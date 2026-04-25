@@ -59,8 +59,8 @@ class IRMASDataset(Dataset):
             # 恢复 Z-Score 标准化
             S_dB_norm = (S_dB - S_dB.mean()) / (S_dB.std() + 1e-8)
             
-            # 增加 channel 维度并复制为 3 通道 (3, n_mels, time_steps)
-            mel_tensor = torch.tensor(S_dB_norm, dtype=torch.float32).unsqueeze(0).repeat(3, 1, 1)
+            # 单通道输入，不再做 ResNet 魔改的 3 通道强复制 
+            mel_tensor = torch.tensor(S_dB_norm, dtype=torch.float32).unsqueeze(0)
             
             # 数据增强：使用 SpecAugment (只在训练集上大面积启用)
             if self.is_train:
@@ -77,7 +77,7 @@ class IRMASDataset(Dataset):
 
         except Exception as e:
             # 文件读取失败时返回一个全零的张量
-            mel_tensor = torch.zeros((3, Config.N_MELS, int(Config.SAMPLES_PER_TRACK/Config.HOP_LENGTH) + 1), dtype=torch.float32)
+            mel_tensor = torch.zeros((1, Config.N_MELS, int(Config.SAMPLES_PER_TRACK/Config.HOP_LENGTH) + 1), dtype=torch.float32)
             
         return mel_tensor, torch.tensor(label, dtype=torch.long)
 

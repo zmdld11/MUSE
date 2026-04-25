@@ -24,7 +24,7 @@ class Config:
     NUM_CLASSES = 11
     
     # Model parameters
-    IN_CHANNELS = 3
+    IN_CHANNELS = 1 # 原创CNN使用单通道输入
     
     # Misc
     NUM_WORKERS = 4
