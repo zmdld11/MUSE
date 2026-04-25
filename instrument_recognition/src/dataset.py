@@ -5,17 +5,10 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 import collections
+from config import Config
 
 CLASS_NAMES = ['cel', 'cla', 'flu', 'gac', 'gel', 'org', 'pia', 'sax', 'tru', 'vio', 'voi']
 CLASS_TO_IDX = {name: idx for idx, name in enumerate(CLASS_NAMES)}
-
-SAMPLE_RATE = 22050
-N_MELS = 128
-HOP_LENGTH = 512
-N_FFT = 2048
-# IRMAS 训练集通常是 3 秒的音频切片
-DURATION = 3.0
-SAMPLES_PER_TRACK = int(SAMPLE_RATE * DURATION)
 
 class IRMASDataset(Dataset):
     def __init__(self, data_path, is_train=True, split_ratio=0.8):
@@ -50,17 +43,17 @@ class IRMASDataset(Dataset):
         file_path = self.file_paths[idx]
         label = self.labels[idx]
         
-        # 加载音频，统一截断或填充到 SAMPLES_PER_TRACK
+        # 加载音频，统一截断或填充到 Config.SAMPLES_PER_TRACK
         try:
-            y, sr = librosa.load(file_path, sr=SAMPLE_RATE)
-            if len(y) > SAMPLES_PER_TRACK:
-                y = y[:SAMPLES_PER_TRACK]
+            y, sr = librosa.load(file_path, sr=Config.SAMPLE_RATE)
+            if len(y) > Config.SAMPLES_PER_TRACK:
+                y = y[:Config.SAMPLES_PER_TRACK]
             else:
-                y = np.pad(y, (0, max(0, SAMPLES_PER_TRACK - len(y))))
+                y = np.pad(y, (0, max(0, Config.SAMPLES_PER_TRACK - len(y))))
                 
             # 提取 Mel 频谱图
             S = librosa.feature.melspectrogram(
-                y=y, sr=SAMPLE_RATE, n_fft=N_FFT, hop_length=HOP_LENGTH, n_mels=N_MELS
+                y=y, sr=Config.SAMPLE_RATE, n_fft=Config.N_FFT, hop_length=Config.HOP_LENGTH, n_mels=Config.N_MELS
             )
             S_dB = librosa.power_to_db(S, ref=np.max)
             # 恢复 Z-Score 标准化
@@ -84,7 +77,7 @@ class IRMASDataset(Dataset):
 
         except Exception as e:
             # 文件读取失败时返回一个全零的张量
-            mel_tensor = torch.zeros((1, N_MELS, int(SAMPLES_PER_TRACK/HOP_LENGTH) + 1), dtype=torch.float32)
+            mel_tensor = torch.zeros((3, Config.N_MELS, int(Config.SAMPLES_PER_TRACK/Config.HOP_LENGTH) + 1), dtype=torch.float32)
             
         return mel_tensor, torch.tensor(label, dtype=torch.long)
 

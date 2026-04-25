@@ -15,6 +15,11 @@ class AdaptiveInstrumentClassifier(nn.Module):
         
         # 我们的 Mel 频谱图是 1 通道的灰度图，为了不破坏预训练特征，我们在 dataset 中将其复制为 3 通道
         # 主干网络不用修改 conv1，完美复用 ImageNet 的底层特征
+        
+        # 冻结主干网络的前半部分（防止在小样本上严重过拟合毁坏预训练权重）
+        for name, param in self.backbone.named_parameters():
+            if 'layer3' not in name and 'layer4' not in name and 'fc' not in name:
+                param.requires_grad = False
             
         # 修改全连接输出层，匹配 11 个乐器类别。这里使用带单一定量 Dropout 的简单线性分类器
         num_ftrs = self.backbone.fc.in_features
