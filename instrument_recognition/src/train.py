@@ -11,15 +11,17 @@ from model import AdaptiveInstrumentClassifier
 
 # 超参数
 DATA_PATH = r"D:\program_project\MUSE\data\IRMAS-TrainingData"
-LOG_DIR = "../model/log"
-MODEL_DIR = "../model"
-EPOCHS = 10
-BATCH_SIZE = 64 # 控制以确保 epoch 在 5 分钟内
-LEARNING_RATE = 1e-3
+LOG_DIR = "model/log"
+MODEL_DIR = "model"
+EPOCHS = 50 # 增加迭代轮数以收敛高强度扩增数据
+BATCH_SIZE = 64
+LEARNING_RATE = 1e-4 # 使用转移学习（微调）时，必须将学习率调小 (5e-4 -> 1e-4) 以免毁掉预训练特征
+WEIGHT_DECAY = 1e-3 # 加进 L2 正则化以制裁过拟合
 NUM_CLASSES = 11
 
 def main():
     os.makedirs(LOG_DIR, exist_ok=True)
+
     os.makedirs(MODEL_DIR, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -30,12 +32,14 @@ def main():
 
     # 实例化模型
     # 注意：这里的 config 必须与模型 __init__ 的参一致，这是自适应机制的核心
-    model_config = {'num_classes': NUM_CLASSES, 'in_channels': 1}
+    model_config = {'num_classes': NUM_CLASSES, 'in_channels': 3}
     model = AdaptiveInstrumentClassifier(**model_config)
     model.to(device)
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    # 更换优化器策略: 换成带动量的 SGD 及 CosineAnnealingLR
+    optimizer = optim.SGD(model.parameters(), lr=1e-3, momentum=0.9, weight_decay=WEIGHT_DECAY)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
     start_epoch = 0
     best_acc = 0.0
@@ -100,6 +104,9 @@ def main():
         val_acc = correct / total
 
         print(f"Epoch {epoch+1}: Train Loss CPU: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f} | Val Acc: {val_acc:.4f}")
+        
+        # 调度器自动调整
+        scheduler.step()
 
         # 记录日志
         with open(log_file, "a") as f:

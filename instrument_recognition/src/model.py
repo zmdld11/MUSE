@@ -1,26 +1,25 @@
+import torch
 import torch.nn as nn
-from torchvision.models import resnet18, ResNet18_Weights
+from torchvision.models import resnet34, ResNet34_Weights
 
 class AdaptiveInstrumentClassifier(nn.Module):
     """
-    通用型基类乐器分类器：只要通过此类名动态实例化，
-    无论多少类，输入多少通道，或者特征维度，只要改变 config 即可，
-    不需要动用推断代码。
+    提升型乐器分类器：升级至 ResNet34 以提取更深维度的声学特征，
+    加设更猛烈的 Dropout 及全连接来抵抗过拟合。
     """
     def __init__(self, num_classes=11, in_channels=1):
         super(AdaptiveInstrumentClassifier, self).__init__()
         
-        # 加载带预训练权重的 ResNet18
-        self.backbone = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
+        # 加载带预训练权重的 ResNet34
+        self.backbone = resnet34(weights=ResNet34_Weights.IMAGENET1K_V1)
         
-        # 我们的 Mel 频谱图是 1 通道的灰度图（或者是伪彩色的 3 通道），修改第 1 个卷积层
-        if in_channels != 3:
-            self.backbone.conv1 = nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        # 我们的 Mel 频谱图是 1 通道的灰度图，为了不破坏预训练特征，我们在 dataset 中将其复制为 3 通道
+        # 主干网络不用修改 conv1，完美复用 ImageNet 的底层特征
             
-        # 修改全连接输出层，匹配 11 个乐器类别
+        # 修改全连接输出层，匹配 11 个乐器类别。这里使用带单一定量 Dropout 的简单线性分类器
         num_ftrs = self.backbone.fc.in_features
         self.backbone.fc = nn.Sequential(
-            nn.Dropout(0.5), # 防止过拟合
+            nn.Dropout(0.3), # 降低 Dropout
             nn.Linear(num_ftrs, num_classes)
         )
 
