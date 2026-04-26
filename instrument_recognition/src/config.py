@@ -1,30 +1,28 @@
+# config.py
 import os
+import torch
 
 class Config:
-    # Base paths
-    DATA_PATH = r"D:\program_project\MUSE\data\IRMAS-TrainingData"
-    WORKING_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    LOG_DIR = os.path.join(WORKING_DIR, "model", "log")
-    MODEL_DIR = os.path.join(WORKING_DIR, "model")
-    
-    # Audio preprocessing
-    SAMPLE_RATE = 22050
-    N_MELS = 128
-    HOP_LENGTH = 512
-    N_FFT = 2048
-    DURATION = 3.0
-    SAMPLES_PER_TRACK = int(SAMPLE_RATE * DURATION)
-    
-    # Training hyperparameters
-    EPOCHS = 50
-    BATCH_SIZE = 64
-    LEARNING_RATE = 1e-3  # SGD learning rate for fine-tuning
-    WEIGHT_DECAY = 1e-3
-    MOMENTUM = 0.9
-    NUM_CLASSES = 11
-    
-    # Model parameters
-    IN_CHANNELS = 1 # 原创CNN使用单通道输入
-    
-    # Misc
-    NUM_WORKERS = 4
+    def __init__(self):
+        self.WORKSPACE_DIR = r"D:\program_project\MUSE\instrument_recognition"
+        self.DATASET_DIR = r"D:\program_project\MUSE\data\IRMAS-TrainingData"
+        self.MODEL_DIR = os.path.join(self.WORKSPACE_DIR, "model")
+        self.LOG_DIR = os.path.join(self.MODEL_DIR, "log")
+        
+        # Audio params
+        self.SR = 22050
+        self.DURATION = 3 # seconds
+        self.N_MELS = 128
+        self.N_MFCC = 13
+        
+        # Train params
+        self.BATCH_SIZE = 32
+        self.EPOCHS = 100
+        self.LR = 1e-3
+        
+        self.DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        os.makedirs(self.MODEL_DIR, exist_ok=True)
+        os.makedirs(self.LOG_DIR, exist_ok=True)
+
+config = Config()
