@@ -20,7 +20,8 @@ def train():
     print(f"模型总参数量: {total_params:,}")
     
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.LR)
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.LR, weight_decay=1e-4) # Added weight decay to regularize
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.EPOCHS)
     
     start_epoch = 0
     best_acc = 0.0
@@ -33,6 +34,8 @@ def train():
             if ckpt.get('version') == model_version:
                 model.load_state_dict(ckpt['model_state_dict'])
                 optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+                if 'scheduler_state_dict' in ckpt:
+                    scheduler.load_state_dict(ckpt['scheduler_state_dict'])
                 start_epoch = ckpt['epoch'] + 1
                 best_acc = ckpt.get('best_acc', 0.0)
                 print(f"成功从最新的 Checkpoint 恢复！回到 Epoch {start_epoch}, 历史最佳准确率: {best_acc:.2f}%")
@@ -104,8 +107,11 @@ def train():
         avg_val_loss = val_loss / len(val_loader)
         avg_val_acc = val_correct / val_total
         
+        # Step scheduler
+        scheduler.step()
+        
         acc_percent = 100. * avg_val_acc
-        print(f"Epoch {epoch+1}: Train Loss: {avg_train_loss:.4f}, Train Acc: {100.*avg_train_acc:.2f}% | Val Loss: {avg_val_loss:.4f}, Val Acc: {acc_percent:.2f}%")
+        print(f"Epoch {epoch+1}: Train Loss: {avg_train_loss:.4f}, Train Acc: {100.*avg_train_acc:.2f}% | Val Loss: {avg_val_loss:.4f}, Val Acc: {acc_percent:.2f}% | LR: {scheduler.get_last_lr()[0]:.6f}")
         
         with open(log_file_path, "a") as f:
             f.write(f"{epoch+1}\t{avg_train_loss:.4f}\t{avg_train_acc:.4f}\t{avg_val_loss:.4f}\t{avg_val_acc:.4f}\n")
@@ -114,7 +120,8 @@ def train():
             best_acc = acc_percent
             torch.save({
                 'version': model_version,
-                'model_state_dict': model.state_dict()
+                'model_state_dict': model.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict()
             }, checkpoint_path)
             print(f"Saved new best model to {checkpoint_path}")
             
@@ -123,6 +130,7 @@ def train():
             'version': model_version,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
             'best_acc': best_acc
         }, latest_checkpoint_path)
 

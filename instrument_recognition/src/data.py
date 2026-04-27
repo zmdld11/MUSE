@@ -9,10 +9,33 @@ from sklearn.preprocessing import LabelEncoder
 from src.config import config
 from tqdm import tqdm
 
+from torchvision import transforms
+import torchaudio.transforms as T
+import random
+
+class SpecAugment(object):
+    def __init__(self, freq_mask_param=15, time_mask_param=15, freq_masks=2, time_masks=2):
+        self.freq_mask = T.FrequencyMasking(freq_mask_param)
+        self.time_mask = T.TimeMasking(time_mask_param)
+        self.freq_masks = freq_masks
+        self.time_masks = time_masks
+        
+    def __call__(self, spec):
+        # Apply SpecAugment purely dynamically
+        if random.random() > 0.5:
+            for _ in range(self.freq_masks):
+                spec = self.freq_mask(spec)
+            for _ in range(self.time_masks):
+                spec = self.time_mask(spec)
+        return spec
+
 class IRMASDataset(Dataset):
-    def __init__(self, data_dir, transform=True):
+    def __init__(self, data_dir, transform=True, is_train=False):
         self.data_dir = data_dir
         self.transform = transform
+        self.is_train = is_train
+        
+        self.spec_aug = SpecAugment() if is_train else None
         
         self.cache_file = os.path.join(config.CACHE_DIR, f"cache_{config.MODEL_VERSION}.pt")
         if os.path.exists(self.cache_file):
@@ -91,7 +114,11 @@ class IRMASDataset(Dataset):
         return len(self.filepaths)
 
     def __getitem__(self, idx):
-        return self.cache[idx]
+        feats, label = self.cache[idx]
+        if self.is_train and self.spec_aug:
+            # We must unsqueeze/squeeze because SpecAugment expects (C, F, T) and feats is (1, F, T)
+            feats = self.spec_aug(feats)
+        return feats, label
 
 def get_dataloaders(val_split=0.2):
     dataset = IRMASDataset(config.DATASET_DIR)
@@ -99,6 +126,16 @@ def get_dataloaders(val_split=0.2):
     val_size = int(len(dataset) * val_split)
     train_size = len(dataset) - val_size
     train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
+    
+    # Need to inject is_train correctly. random_split creates Subset.
+    train_dataset.dataset.is_train = True # Quick hack but affects both. Wait, they share IRMASDataset.
+    
+    # A cleaner approach is to make a copy for train with is_train=True
+    import copy
+    train_dataset_base = copy.copy(dataset)
+    train_dataset_base.is_train = True
+    train_dataset_base.spec_aug = SpecAugment()
+    train_dataset.dataset = train_dataset_base
     
     train_loader = DataLoader(train_dataset, batch_size=config.BATCH_SIZE, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_dataset, batch_size=config.BATCH_SIZE, shuffle=False, num_workers=0)
