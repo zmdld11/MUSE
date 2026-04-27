@@ -51,10 +51,17 @@ if __name__ == '__main__':
     if len(sys.argv) > 1:
         audio_file = sys.argv[1]
     else:
-        audio_file = 'sample.wav'
+        # 如果没有传入参数，默认指向 MUSE根目录/music/ 文件夹下的某个测试文件
+        muse_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+        audio_file = os.path.join(muse_root, 'music', 'sample.wav')
         
     model_file = os.path.join(config.MODEL_DIR, 'best_model.pth')
-    if os.path.exists(audio_file) and os.path.exists(model_file):
-        infer(audio_file, model_file)
+    
+    if not os.path.exists(audio_file):
+        print(f"找不到音频文件: {audio_file}")
+        print(f"请在运行命令时指定音频文件路径，例如: python test/infer.py D:/program_project/MUSE/music/你的音频.wav")
+    elif not os.path.exists(model_file):
+        print(f"找不到模型文件: {model_file}")
+        print("请检查模型是否训练完成或路径是否正确。")
     else:
-        print('Model or audio file missing.')
+        infer(audio_file, model_file)
