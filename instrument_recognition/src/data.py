@@ -7,6 +7,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import LabelEncoder
 from src.config import config
+from tqdm import tqdm
 
 class IRMASDataset(Dataset):
     def __init__(self, data_dir, transform=True):
@@ -27,6 +28,14 @@ class IRMASDataset(Dataset):
                 
         self.encoded_labels = self.label_encoder.transform(self.labels)
         self.transform = transform
+        
+        # 预先将所有的音频特征提取并加载到内存缓存中，防止在训练过程中每次都进行耗时的I/O与librosa计算
+        self.cache = {}
+        print("Pre-loading and extracting all audio features to Memory...")
+        for idx in tqdm(range(len(self.filepaths)), desc="Caching dataset"):
+            feats = self._extract_features(self.filepaths[idx])
+            label = self.encoded_labels[idx]
+            self.cache[idx] = (torch.tensor(feats, dtype=torch.float32), torch.tensor(label, dtype=torch.long))
         
     def _extract_features(self, filepath):
         y, sr = librosa.load(filepath, sr=config.SR, duration=config.DURATION)
@@ -51,9 +60,7 @@ class IRMASDataset(Dataset):
         return len(self.filepaths)
 
     def __getitem__(self, idx):
-        feats = self._extract_features(self.filepaths[idx])
-        label = self.encoded_labels[idx]
-        return torch.tensor(feats, dtype=torch.float32), torch.tensor(label, dtype=torch.long)
+        return self.cache[idx]
 
 def get_dataloaders(val_split=0.2):
     dataset = IRMASDataset(config.DATASET_DIR)
