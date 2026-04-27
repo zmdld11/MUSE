@@ -13,26 +13,43 @@ def train():
     device = config.DEVICE
     train_loader, val_loader, classes = get_dataloaders(val_split=0.2)
     
-    model_version = "VER1.4_CustomCNN"
+    model_version = config.MODEL_VERSION
     model = SimplifiedAdvancedClassifier(num_classes=len(classes)).to(device)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"模型版本: {model_version}")
     print(f"模型总参数量: {total_params:,}")
     
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.LR)
+    
+    start_epoch = 0
+    best_acc = 0.0
+    checkpoint_path = os.path.join(config.MODEL_DIR, "best_model.pth")
+    latest_checkpoint_path = os.path.join(config.MODEL_DIR, "checkpoint_latest.pth")
+
+    if os.path.exists(latest_checkpoint_path):
+        try:
+            ckpt = torch.load(latest_checkpoint_path, map_location=device)
+            if ckpt.get('version') == model_version:
+                model.load_state_dict(ckpt['model_state_dict'])
+                optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+                start_epoch = ckpt['epoch'] + 1
+                best_acc = ckpt.get('best_acc', 0.0)
+                print(f"成功从最新的 Checkpoint 恢复！回到 Epoch {start_epoch}, 历史最佳准确率: {best_acc:.2f}%")
+            else:
+                print(f"Checkpoint 版本不匹配 (上次版本: {ckpt.get('version')}, 当前: {model_version})，将重新开始训练。")
+        except Exception as e:
+            print(f"加载 Checkpoint 失败，将重新开始训练。错误信息: {e}")
+
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     log_file_path = os.path.join(config.LOG_DIR, f"{timestamp}.log")
     with open(log_file_path, "w") as f:
         f.write(f"Model Version: {model_version}\n")
         f.write(f"Total Parameters: {total_params:,}\n")
+        f.write(f"Resumed from Epoch: {start_epoch}\n")
         f.write("Epoch\tTrain_Loss\tTrain_Acc\tVal_Loss\tVal_Acc\n")
     
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.LR)
-    
-    best_acc = 0.0
-    checkpoint_path = os.path.join(config.MODEL_DIR, "best_model.pth")
-    
-    for epoch in range(config.EPOCHS):
+    for epoch in range(start_epoch, config.EPOCHS):
         model.train()
         train_loss = 0
         train_correct = 0
@@ -88,8 +105,19 @@ def train():
         
         if acc_percent > best_acc:
             best_acc = acc_percent
-            torch.save(model.state_dict(), checkpoint_path)
+            torch.save({
+                'version': model_version,
+                'model_state_dict': model.state_dict()
+            }, checkpoint_path)
             print(f"Saved new best model to {checkpoint_path}")
+            
+        torch.save({
+            'epoch': epoch,
+            'version': model_version,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'best_acc': best_acc
+        }, latest_checkpoint_path)
 
 if __name__ == "__main__":
     train()

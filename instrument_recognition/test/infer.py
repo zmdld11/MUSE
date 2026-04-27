@@ -16,7 +16,14 @@ def infer(audio_path, model_path):
     classes = sorted([d for d in os.listdir(config.DATASET_DIR) if os.path.isdir(os.path.join(config.DATASET_DIR, d))])
     
     model = SimplifiedAdvancedClassifier(num_classes=len(classes)).to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    
+    ckpt = torch.load(model_path, map_location=device)
+    if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
+        model.load_state_dict(ckpt['model_state_dict'])
+        print(f"Loaded Model Version: {ckpt.get('version', 'Unknown')}")
+    else:
+        model.load_state_dict(ckpt)
+        
     model.eval()
     
     y, sr = librosa.load(audio_path, sr=config.SR, duration=config.DURATION)

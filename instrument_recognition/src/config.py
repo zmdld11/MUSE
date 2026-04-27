@@ -5,7 +5,9 @@ import torch
 class Config:
     def __init__(self):
         self.WORKSPACE_DIR = r"D:\program_project\MUSE\instrument_recognition"
+        self.MODEL_VERSION = "VER1.4_CustomCNN"
         self.DATASET_DIR = r"D:\program_project\MUSE\data\IRMAS-TrainingData"
+        self.CACHE_DIR = r"D:\program_project\MUSE\data\preprocessed_cache"
         self.MODEL_DIR = os.path.join(self.WORKSPACE_DIR, "model")
         self.LOG_DIR = os.path.join(self.MODEL_DIR, "log")
         
@@ -24,5 +26,6 @@ class Config:
         
         os.makedirs(self.MODEL_DIR, exist_ok=True)
         os.makedirs(self.LOG_DIR, exist_ok=True)
+        os.makedirs(self.CACHE_DIR, exist_ok=True)
 
 config = Config()
