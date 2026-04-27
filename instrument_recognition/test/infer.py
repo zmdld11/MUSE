@@ -70,16 +70,28 @@ def analyze_audio(audio_path, model, classes, device):
             
     all_probs = np.array(all_probs)
     
-    # Plotting result
-    plt.figure(figsize=(14, 6))
-    for i in range(len(classes)):
-        plt.plot(times, all_probs[:, i], label=classes[i])
+    # Plotting result: Gantt chart-like activation map
+    threshold = 0.25 # 判断某乐器是否激活的置信度阈值
+    window_sec = config.DURATION # 每个预测窗口代表的总时长(秒)
+    
+    fig, ax = plt.subplots(figsize=(14, 8))
+    cmap = plt.get_cmap('tab20')
+    
+    for i, instrument in enumerate(classes):
+        active_segments = []
+        for t_idx, t in enumerate(times):
+            if all_probs[t_idx, i] >= threshold:
+                # 绘制从该窗口起始点往后延伸的一整段时间
+                active_segments.append((t, window_sec))
         
-    plt.title(f"Instrument Probabilities Over Time: {os.path.basename(audio_path)}")
-    plt.xlabel("Time (seconds)")
-    plt.ylabel("Probability")
-    plt.legend(loc='center left', bbox_to_anchor=(1.0, 0.5))
-    plt.grid(True)
+        if active_segments:
+            ax.broken_barh(active_segments, (i - 0.4, 0.8), facecolors=cmap(i % 20))
+            
+    ax.set_yticks(range(len(classes)))
+    ax.set_yticklabels(classes)
+    ax.set_xlabel("时间 / Time (s)")
+    ax.set_title(f"【{os.path.basename(audio_path)}】 乐器激活时间横轴图 (判定阈值: {threshold})")
+    ax.grid(True, axis='x', linestyle='--', alpha=0.7)
     plt.tight_layout()
     
     output_dir = os.path.join(config.WORKSPACE_DIR, 'output', config.MODEL_VERSION)
