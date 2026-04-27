@@ -1,5 +1,7 @@
 # train.py
 import os
+import glob
+import time
 import torch
 import torch.nn as nn
 from tqdm import tqdm
@@ -7,11 +9,32 @@ from src.config import config
 from src.data import get_dataloaders
 from src.model import SimplifiedAdvancedClassifier
 
+def clean_old_logs():
+    log_files = glob.glob(os.path.join(config.LOG_DIR, "*.log"))
+    for f in log_files:
+        try:
+            os.remove(f)
+        except Exception:
+            pass
+
 def train():
+    clean_old_logs()
     device = config.DEVICE
     train_loader, val_loader, classes = get_dataloaders(val_split=0.2)
     
+    model_version = "VER1.4_CustomCNN"
     model = SimplifiedAdvancedClassifier(num_classes=len(classes)).to(device)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"模型版本: {model_version}")
+    print(f"模型总参数量: {total_params:,}")
+    
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    log_file_path = os.path.join(config.LOG_DIR, f"{timestamp}.log")
+    with open(log_file_path, "w") as f:
+        f.write(f"Model Version: {model_version}\n")
+        f.write(f"Total Parameters: {total_params:,}\n")
+        f.write("Epoch\tTrain_Loss\tTrain_Acc\tVal_Loss\tVal_Acc\n")
+    
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=config.LR)
     
@@ -21,8 +44,8 @@ def train():
     for epoch in range(config.EPOCHS):
         model.train()
         train_loss = 0
-        correct = 0
-        total = 0
+        train_correct = 0
+        train_total = 0
         
         # training loop with tqdm
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.EPOCHS}")
@@ -37,16 +60,21 @@ def train():
             
             train_loss += loss.item()
             _, predicted = outputs.max(1)
-            total += targets.size(0)
-            correct += predicted.eq(targets).sum().item()
+            train_total += targets.size(0)
+            train_correct += predicted.eq(targets).sum().item()
             
-            pbar.set_postfix({'loss': train_loss / (pbar.n + 1), 'acc': 100. * correct / total})
+            current_loss = train_loss / (pbar.n + 1)
+            current_acc = 100. * train_correct / train_total
+            pbar.set_postfix({'loss': f"{current_loss:.4f}", 'acc': f"{current_acc:.2f}%"})
+
+        avg_train_loss = train_loss / len(train_loader)
+        avg_train_acc = train_correct / train_total
 
         # Eval
         model.eval()
         val_loss = 0
-        correct = 0
-        total = 0
+        val_correct = 0
+        val_total = 0
         with torch.no_grad():
             for inputs, targets in val_loader:
                 inputs, targets = inputs.to(device), targets.to(device)
@@ -55,14 +83,20 @@ def train():
                 
                 val_loss += loss.item()
                 _, predicted = outputs.max(1)
-                total += targets.size(0)
-                correct += predicted.eq(targets).sum().item()
+                val_total += targets.size(0)
+                val_correct += predicted.eq(targets).sum().item()
         
-        acc = 100. * correct / total
-        print(f"Validation Loss: {val_loss / len(val_loader):.4f}, Accuracy: {acc:.2f}%")
+        avg_val_loss = val_loss / len(val_loader)
+        avg_val_acc = val_correct / val_total
         
-        if acc > best_acc:
-            best_acc = acc
+        acc_percent = 100. * avg_val_acc
+        print(f"Epoch {epoch+1}: Train Loss: {avg_train_loss:.4f}, Train Acc: {100.*avg_train_acc:.2f}% | Val Loss: {avg_val_loss:.4f}, Val Acc: {acc_percent:.2f}%")
+        
+        with open(log_file_path, "a") as f:
+            f.write(f"{epoch+1}\t{avg_train_loss:.4f}\t{avg_train_acc:.4f}\t{avg_val_loss:.4f}\t{avg_val_acc:.4f}\n")
+        
+        if acc_percent > best_acc:
+            best_acc = acc_percent
             torch.save(model.state_dict(), checkpoint_path)
             print(f"Saved new best model to {checkpoint_path}")
 
