@@ -70,8 +70,13 @@ def analyze_audio(audio_path, model, classes, device):
             
     all_probs = np.array(all_probs)
     
+    # [修复推断幻觉] 对概率随时间进行移动平均平滑，消除突然且孤立的“吉他”极短误报
+    smooth_window = 3
+    for i in range(all_probs.shape[1]):
+        all_probs[:, i] = np.convolve(all_probs[:, i], np.ones(smooth_window)/smooth_window, mode='same')
+    
     # Plotting result: Gantt chart-like activation map
-    threshold = 0.25 # 判断某乐器是否激活的置信度阈值
+    threshold = 0.35 # 提高原本过低的置信度阈值，从 0.25 拔高到 0.35 过滤底噪
     window_sec = config.DURATION # 每个预测窗口代表的总时长(秒)
     
     fig, ax = plt.subplots(figsize=(14, 8))
