@@ -17,7 +17,7 @@ def infer(audio_path, model_path):
     
     model = SimplifiedAdvancedClassifier(num_classes=len(classes)).to(device)
     
-    ckpt = torch.load(model_path, map_location=device)
+    ckpt = torch.load(model_path, map_location=device, weights_only=False)
     if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
         model.load_state_dict(ckpt['model_state_dict'])
         print(f"Loaded Model Version: {ckpt.get('version', 'Unknown')}")

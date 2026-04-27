@@ -29,7 +29,7 @@ def train():
 
     if os.path.exists(latest_checkpoint_path):
         try:
-            ckpt = torch.load(latest_checkpoint_path, map_location=device)
+            ckpt = torch.load(latest_checkpoint_path, map_location=device, weights_only=False)
             if ckpt.get('version') == model_version:
                 model.load_state_dict(ckpt['model_state_dict'])
                 optimizer.load_state_dict(ckpt['optimizer_state_dict'])
@@ -40,6 +40,13 @@ def train():
                 print(f"Checkpoint 版本不匹配 (上次版本: {ckpt.get('version')}, 当前: {model_version})，将重新开始训练。")
         except Exception as e:
             print(f"加载 Checkpoint 失败，将重新开始训练。错误信息: {e}")
+
+    if start_epoch >= config.EPOCHS:
+        print(f"\n============================================\n"
+              f"模型已经达到配置的最大 Epoch 数 ({config.EPOCHS})，无需继续训练！\n"
+              f"如需继续训练该模型，请前往 src/config.py 调大 EPOCHS 参数。\n"
+              f"============================================\n")
+        return
 
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     log_file_path = os.path.join(config.LOG_DIR, f"{timestamp}.log")

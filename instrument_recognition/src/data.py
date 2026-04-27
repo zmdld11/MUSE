@@ -17,7 +17,7 @@ class IRMASDataset(Dataset):
         self.cache_file = os.path.join(config.CACHE_DIR, f"cache_{config.MODEL_VERSION}.pt")
         if os.path.exists(self.cache_file):
             print(f"Loading preprocessed dataset from file cache: {self.cache_file}...")
-            cache_data = torch.load(self.cache_file)
+            cache_data = torch.load(self.cache_file, weights_only=False)
             self.filepaths = cache_data['filepaths']
             self.labels = cache_data['labels']
             self.classes = cache_data['classes']
