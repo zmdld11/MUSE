@@ -9,16 +9,7 @@ from src.config import config
 from src.data import get_dataloaders
 from src.model import SimplifiedAdvancedClassifier
 
-def clean_old_logs():
-    log_files = glob.glob(os.path.join(config.LOG_DIR, "*.log"))
-    for f in log_files:
-        try:
-            os.remove(f)
-        except Exception:
-            pass
-
 def train():
-    clean_old_logs()
     device = config.DEVICE
     train_loader, val_loader, classes = get_dataloaders(val_split=0.2)
     
