@@ -6,6 +6,7 @@ class Config:
     def __init__(self):
         self.WORKSPACE_DIR = r"D:\program_project\MUSE\instrument_recognition"
         self.MODEL_VERSION = "VER1.6_WiderCNN"
+        self.DATASET_VERSION = "V1_IRMAS_Base"
         self.DATASET_DIR = r"D:\program_project\MUSE\data\IRMAS-TrainingData"
         self.CACHE_DIR = r"D:\program_project\MUSE\data\preprocessed_cache"
         self.MODEL_DIR = os.path.join(self.WORKSPACE_DIR, "model")

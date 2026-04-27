@@ -37,7 +37,7 @@ class IRMASDataset(Dataset):
         
         self.spec_aug = SpecAugment() if is_train else None
         
-        self.cache_file = os.path.join(config.CACHE_DIR, f"cache_{config.MODEL_VERSION}.pt")
+        self.cache_file = os.path.join(config.CACHE_DIR, f"cache_{config.DATASET_VERSION}.pt")
         if os.path.exists(self.cache_file):
             print(f"Loading preprocessed dataset from file cache: {self.cache_file}...")
             cache_data = torch.load(self.cache_file, weights_only=False)
@@ -49,14 +49,7 @@ class IRMASDataset(Dataset):
             print("Dataset successfully loaded from cache.")
             return
             
-        print(f"Cache file {self.cache_file} not found. Deleting previous versions and reprocessing...")
-        old_caches = glob.glob(os.path.join(config.CACHE_DIR, "cache_*.pt"))
-        for oc in old_caches:
-            try:
-                os.remove(oc)
-                print(f"Deleted old cache file: {oc}")
-            except Exception:
-                pass
+        print(f"Cache file {self.cache_file} not found. Re-processing raw dataset (will not auto-delete old isolated versions)...")
 
         self.filepaths = []
         self.labels = []
