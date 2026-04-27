@@ -44,24 +44,41 @@ def infer(audio_path, model_path):
         top_prob, top_idx = torch.max(probabilities, 1)
         
     predicted_class = classes[top_idx.item()]
-    print(f"Predicted class: {predicted_class} (Probability: {top_prob.item():.4f})")
+    print(f"[{os.path.basename(audio_path)}] Predicted class: {predicted_class} (Probability: {top_prob.item():.4f})")
     return predicted_class
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1:
-        audio_file = sys.argv[1]
-    else:
-        # 如果没有传入参数，默认指向 MUSE根目录/music/ 文件夹下的某个测试文件
-        muse_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-        audio_file = os.path.join(muse_root, 'music', 'sample.wav')
-        
+    muse_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+    music_dir = os.path.join(muse_root, 'music')
     model_file = os.path.join(config.MODEL_DIR, 'best_model.pth')
     
-    if not os.path.exists(audio_file):
-        print(f"找不到音频文件: {audio_file}")
-        print(f"请在运行命令时指定音频文件路径，例如: python test/infer.py D:/program_project/MUSE/music/你的音频.wav")
-    elif not os.path.exists(model_file):
+    if not os.path.exists(model_file):
         print(f"找不到模型文件: {model_file}")
         print("请检查模型是否训练完成或路径是否正确。")
+        sys.exit(1)
+
+    if len(sys.argv) > 1:
+        audio_file = sys.argv[1]
+        if not os.path.exists(audio_file):
+            print(f"找不到音频文件: {audio_file}")
+        else:
+            print(f"--- 正在预测文件: {os.path.basename(audio_file)} ---")
+            infer(audio_file, model_file)
     else:
-        infer(audio_file, model_file)
+        # 如果没有传入参数，默认推断 MUSE根目录/music/ 文件夹下的所有测试文件
+        if not os.path.exists(music_dir):
+            print(f"找不到音乐文件夹: {music_dir}")
+            sys.exit(1)
+            
+        supported_formats = ('.wav', '.mp3', '.flac', '.ogg')
+        audio_files = [os.path.join(music_dir, f) for f in os.listdir(music_dir) if f.lower().endswith(supported_formats)]
+        
+        if not audio_files:
+            print(f"警告: 在 {music_dir} 下没有找到支持的音频文件 {supported_formats}。")
+            print(f"你可以放一些音频文件进去，或者在运行命令时指定音频文件路径:")
+            print(f"python test/infer.py D:/program_project/MUSE/music/你的音频.wav")
+        else:
+            print(f"在 {music_dir} 中找到 {len(audio_files)} 个音频文件。开始批量推断...")
+            for idx, audio_file in enumerate(audio_files, 1):
+                print(f"\n[{idx}/{len(audio_files)}] 正在预测文件: {os.path.basename(audio_file)} ...")
+                infer(audio_file, model_file)
