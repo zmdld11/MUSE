@@ -4,6 +4,11 @@ import librosa
 import numpy as np
 import sys
 import matplotlib.pyplot as plt
+from tqdm import tqdm
+
+# Configure matplotlib to support Chinese characters properly
+plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'Arial Unicode MS']
+plt.rcParams['axes.unicode_minus'] = False
 
 # Add src to pythonpath
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -42,7 +47,7 @@ def analyze_audio(audio_path, model, classes, device):
     all_probs = []
     
     with torch.no_grad():
-        for i in range(num_windows):
+        for i in tqdm(range(num_windows), desc=f"扫描进度", leave=False):
             start = i * hop_length
             end = start + window_length
             segment = y[start:end]
