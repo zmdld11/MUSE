@@ -20,7 +20,7 @@ def train():
     print(f"模型总参数量: {total_params:,}")
     
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.LR, weight_decay=1e-4) # Added weight decay to regularize
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.LR) # Removed weight decay to cure underfitting
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.EPOCHS)
     
     start_epoch = 0
