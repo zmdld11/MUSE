@@ -14,15 +14,15 @@ import torchaudio.transforms as T
 import random
 
 class SpecAugment(object):
-    def __init__(self, freq_mask_param=10, time_mask_param=10, freq_masks=1, time_masks=1):
+    def __init__(self, freq_mask_param=12, time_mask_param=12, freq_masks=2, time_masks=2):
         self.freq_mask = T.FrequencyMasking(freq_mask_param)
         self.time_mask = T.TimeMasking(time_mask_param)
         self.freq_masks = freq_masks
         self.time_masks = time_masks
         
     def __call__(self, spec):
-        # Apply SpecAugment slightly (reduced intensity for smaller capacities)
-        if random.random() > 0.6:
+        # Apply SpecAugment slightly stronger than 1.6 to prevent overfitting
+        if random.random() > 0.5:
             for _ in range(self.freq_masks):
                 spec = self.freq_mask(spec)
             for _ in range(self.time_masks):

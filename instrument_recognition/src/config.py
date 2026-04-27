@@ -5,7 +5,7 @@ import torch
 class Config:
     def __init__(self):
         self.WORKSPACE_DIR = r"D:\program_project\MUSE\instrument_recognition"
-        self.MODEL_VERSION = "VER1.6_WiderCNN"
+        self.MODEL_VERSION = "VER1.7_MixedWiderCNN"
         self.DATASET_VERSION = "V2_Mixed_Clean"
         self.DATASET_DIR = r"D:\program_project\MUSE\data\IRMAS-TrainingData"
         self.MEDLEYDB_DIR = r"D:\program_project\MUSE\data\MedleyDB"
