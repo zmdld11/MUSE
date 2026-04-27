@@ -67,19 +67,41 @@ def train():
         
         # training loop with tqdm
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.EPOCHS}")
+        import numpy as np
+        import random
+        
         for inputs, targets in pbar:
             inputs, targets = inputs.to(device), targets.to(device)
             
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
+            # Mixup Augmentation (完美实现了用户所提出的“用纯净音轨自行混合音轨拼凑”的概念)
+            alpha = 0.2
+            if random.random() > 0.5:
+                lam = np.random.beta(alpha, alpha)
+                index = torch.randperm(inputs.size(0)).to(device)
+                
+                mixed_inputs = lam * inputs + (1 - lam) * inputs[index, :]
+                targets_a, targets_b = targets, targets[index]
+                
+                optimizer.zero_grad()
+                outputs = model(mixed_inputs)
+                loss = lam * criterion(outputs, targets_a) + (1 - lam) * criterion(outputs, targets_b)
+                
+                _, predicted = outputs.max(1)
+                dominant_target = targets_a if lam > 0.5 else targets_b
+                train_correct += predicted.eq(dominant_target).sum().item()
+            else:
+                optimizer.zero_grad()
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+                
+                _, predicted = outputs.max(1)
+                train_correct += predicted.eq(targets).sum().item()
+                
             loss.backward()
             optimizer.step()
             
             train_loss += loss.item()
-            _, predicted = outputs.max(1)
             train_total += targets.size(0)
-            train_correct += predicted.eq(targets).sum().item()
             
             current_loss = train_loss / (pbar.n + 1)
             current_acc = 100. * train_correct / train_total

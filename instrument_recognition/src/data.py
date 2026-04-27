@@ -173,9 +173,17 @@ class IRMASDataset(Dataset):
 
     def __getitem__(self, idx):
         feats, label = self.cache[idx]
-        if self.is_train and self.spec_aug:
-            # We must unsqueeze/squeeze because SpecAugment expects (C, F, T) and feats is (1, F, T)
-            feats = self.spec_aug(feats)
+        if self.is_train:
+            # 1. 动态时间平移增强 (Time Shift Augmentation)
+            # 通过随机移动频谱图的时间轴，打破模型对固定“音头=0.1s”的死记硬背
+            _, _, T_dim = feats.shape
+            max_shift = int(T_dim * 0.3) # 允许在 30% 范围内平移
+            shift = random.randint(-max_shift, max_shift)
+            feats = torch.roll(feats, shifts=shift, dims=2)
+            
+            if getattr(self, 'spec_aug', None):
+                # 2. SpecAugment 时频掩码频蔽
+                feats = self.spec_aug(feats)
         return feats, label
 
 def get_dataloaders(val_split=0.2):
