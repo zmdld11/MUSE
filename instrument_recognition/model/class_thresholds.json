@@ -1,0 +1,12 @@
+{
+  "acoustic guitar": 0.5,
+  "cello": 0.5,
+  "drum set": 0.35,
+  "electric bass": 0.35,
+  "electric guitar": 0.3,
+  "flute": 0.4,
+  "piano": 0.3,
+  "singer": 0.35,
+  "synthesizer": 0.55,
+  "violin": 0.35
+}
