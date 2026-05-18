@@ -326,3 +326,283 @@
 4. **Focal Modulation**：2025 年论文建议替代自注意力的方案，对短序列（当前 33 步）可能更有效，且计算量更低。
 
 5. **数据层面**：flute 验证集仅 225 样本（约 2%），可以针对性增加 flute 在混合数据中的出现频率。
+
+---
+
+### 版本: VER3.3_PitchStructured (数据+训练+推理三管齐下)
+
+**目标**：突破 84% F1 平台期，不改变模型架构（保持 TransformerClassifier 不变），从数据分布、训练策略、推理后处理三个层面针对性修复：
+
+1. **Flute/Violin/Cello 漏检严重**（0.718/0.750/0.751）
+2. **短促音信号被平均池化稀释**（`mean(dim=1)` 让瞬态消失）
+3. **钢琴低音误判为电贝斯**（Canon 纯钢琴版出现幻觉）
+
+#### 修改点
+
+**① 数据生成器 —— 薄弱类频率提升** (`data/build_mixed_dataset.py`)
+- 在 `class_weights`（sqrt 逆频率）后施加 Boost 乘数：
+  - Flute: **×3.0**（成为最高权重，目标将其验证占比从 ~2% 提至 ~6%）
+  - Violin: **×2.0**（提升出现率，帮助区分与 cello 的谐波混淆）
+  - Cello: **×1.5**（适度提升）
+- 采样率估算（原始数据分布：flute ~2.7%, violin ~6.5%, cello ~10% → boost 后预期：flute ~6-8%, violin ~10-12%, cello ~12-15%）
+- 总数保持 15,000 不变，被压缩的份额来自电贝斯和钢琴的冗余出现
+
+**② Conditioned Mixup** (`src/train.py`)
+- 当 batch 中包含 cello/flute/violin 任一薄弱类时：
+  - Mixup 概率从 **50% 降至 25%**
+  - Mixup alpha 从 **0.2 降至 0.08**（Beta(0.08, 0.08) 让 λ 几乎总是接近 0 或 1，混合样本中主样本占绝对主导，薄弱类特征不被稀释）
+- 其他 batch 保持原有策略，不影响已优类别的训练效率
+
+**③ Max+Mean 混合池化** (`src/model.py`)
+- 输出头从纯 `mean(dim=1)` 改为 `0.7 × mean + 0.3 × max`
+- 意图：短促音（打击乐器音头、短音 flute 装饰音）在时间轴上可能只占 1-2 帧，在 33 帧的全局平均池化中被严重稀释。Max 池化保留序列上最强烈的响应——如果某个时间步对一个乐器有高置信度激活，max 路径直接保留这个信号。
+- Mean 仍然为主（0.7），保持对持续性乐器的稳定判别；Max 约 0.3，作为"瞬态检测"辅助通道
+
+**④ 频段门控** (`test/infer.py`)
+- 推理后处理规则：当 `piano 概率 > electric bass 概率` 且 `piano 概率 > 0.2` 时，将该窗口的 bass 归零
+- 经验发现：Canon 钢琴曲中检出 bass 的窗口，piano 概率往往极低（~0.03-0.07），说明并非钢琴低音混淆而是模型在不确定区域的通用幻觉。新规则：如果模型认为钢琴比电贝斯更可信（piano > bass），则 bass 的响应更像是低音泛音而非真实 bass
+
+**⑤ 推理平滑窗口下调** (`src/config.py`)
+- `INFER_SMOOTH_WINDOW`: 5 → 3（从 2.5s 平滑降至 1.5s）
+- 降低短促音信号被相邻静音窗口摊薄的程度
+
+**⑥ 推理详细日志** (`test/infer.py`)
+- 每次推理额外输出 `{filename}_probs.csv`，包含每窗口时间戳和各乐器原始概率
+- 位置：`output/VER3.3_PitchStructured/` 目录下，与 PNG 图表同目录
+- 格式：CSV 头 `window_start,acoustic guitar,cello,...,violin`，每行一个窗口
+
+#### 不做的改动
+- 不改模型架构（保持 `TransformerClassifier` 3.06M 参数）
+- 不改学习率、调度器、Loss 函数
+- 不新增相位/音高特征（这些留到 VER3.4+）
+
+**最终模型性能评价 (200 Epochs, full training)**：
+
+| 指标 | 数值 |
+|------|------|
+| 最佳 Val F1 | **86.03%** (epoch 179) |
+| 最终 Train F1 | 88.56% |
+| 最终 Val F1 | 85.63% |
+| 训练集样本 | 15,000 (80/20 split, boosted rare classes) |
+
+**逐类 F1 (epoch 179 最佳模型, 全局阈值 0.5, 未用自适应阈值)**：
+
+| 等级 | 乐器 | F1 | Δ vs VER3.2 |
+|------|------|-----|-------------|
+| 🟢 优秀 | drum set | **0.950** | +0.006 |
+| 🟢 优秀 | singer | **0.931** | -0.003 |
+| 🟢 优秀 | electric guitar | **0.896** | +0.027 ✅ |
+| 🟢 优秀 | electric bass | **0.887** | +0.039 ✅ |
+| 🟡 良好 | synthesizer | 0.839 | -0.010 |
+| 🟡 良好 | piano | **0.805** | +0.020 ✅ |
+| 🟡 良好 | cello | **0.792** | +0.041 ✅ |
+| 🔴 薄弱 | flute | 0.728 | +0.010 |
+| 🔴 薄弱 | violin | 0.730 | -0.020 |
+| 🔴 薄弱 | acoustic guitar | 0.873 | -0.028 |
+
+**关键发现**：
+
+1. **VER3.3 改进有效 +1.4% absolute**（84.63% → 86.03%），主要贡献来自：
+   - Cello +4.1% — 数据 boost + conditioned mixup 效果显著
+   - Electric bass +3.9% — Max+Mean 池化强化了低频瞬态信号
+   - Piano +2.0% — 混合池化帮助钢琴动态范围覆盖更广
+   - Electric guitar +2.7% — 同受益于池化改进
+
+2. **Flute (0.728) 问题未解决**：数据量从 225→253 val，3x boost 未显著提升 F1。说明 flute 的混淆本质是**特征混淆**（与 singer 频段重叠），而非数据量问题。需要相位特征。
+
+3. **Violin (0.730) 轻微倒退**：虽然数据 boost 了 2x，但 violin 与 acoustic guitar 的谐波结构相似性导致 confusion。Conditioned mixup 没有区分能力，只能保留现有特征。
+
+4. **Acoustic guitar (0.873) 下降**：electric guitar 提升的同时 acoustic guitar 下降——模型在两者间有 trade-off。数据 boost 使更多注意力分配到了薄弱类，压缩了 ac.guitar 的容量。
+
+5. **新阈值分布更均匀**：训练后自适应阈值计算显示大多数字段最优阈值为 0.4（VER3.2 为 0.3-0.55），说明 VER3.3 模型输出更"谨慎"。
+
+**推理幻觉修复（后处理门控）**：
+
+在推理阶段添加了频段门控规则（`test/infer.py`）：
+
+| 门控 | 触发条件 | 解决的问题 |
+|------|---------|-----------|
+| piano → e.bass | piano > e.bass AND piano > 0.2 | 钢琴低音被误判为电贝斯 |
+| piano → e.guitar | piano > e.guitar AND piano > 0.2 | 钢琴中频触发失真电吉他的谐波模板 |
+| piano → violin | piano > violin AND piano > 0.2 | 钢琴高音泛音触发小提琴 |
+| singer → violin | singer > violin AND singer > 0.2 | 人声泛音/颤音触发小提琴 |
+| e.guitar → violin | e.guitar > violin AND e.guitar > 0.2 | 电吉他失真谐波与 violin 频段重叠 |
+
+实测效果（VER3.3 模型 + 门控后处理）：
+
+| 歌曲 | 实际乐器 | 修正前幻觉 | 修正后 |
+|------|---------|-----------|--------|
+| 夜の向日葵（纯钢琴） | piano | e.guitar 112窗, violin 64窗 | e.guitar **37窗**, violin **16窗** |
+| 星座になれたら（吉他+贝斯+鼓+人声） | e.bass, e.guitar, drums, singer | violin 48窗 | violin **2窗** |
+| Variations On The Canon（纯钢琴） | piano | e.bass 62窗 | e.bass **7窗** |
+
+**下一步优化方向（VER3.4 及以后）**：
+
+当前 86.03% F1 已接近 Mel+MFCC 幅度谱特征的信息上限。要突破 90% 需要：
+
+1. **相位特征 (Modgd-gram)**：加入改进群延迟函数，捕捉起始瞬态。这对 flute/violin/cello 这类无冲击性音头、靠谐波分布区分的乐器特别有效。预计将输入通道从 141 扩展到 141+128=269。
+
+2. **音高感知特征 (CQT/Chroma)**：告知模型当前音高区域，帮助区分小提琴（高音区）vs 大提琴（低音区）、长笛（中高音区）vs 女声。
+
+3. **声学吉他 vs 电吉他区分**：当前模型将大量 acoustic guitar 误判为 electric guitar（星座曲中 0/511 检出 ac.guitar 但 373/511 检出 e.guitar），需要冲击响应特征或包络特征来区分两者。
+
+4. **类别条件后处理**：当前门控规则是硬编码的，可以改为从数据中学到的乐器共现概率矩阵，使抑制更精准。
+
+
+### 版本: VER3.4_ModgdPhase (相位特征突破)
+
+**目标**：突破 86% F1 平台期。核心思路：在 Mel+MFCC 幅度谱基础上加入 Modgd-gram（修正群延迟相位特征），让模型同时感知幅度和相位信息，解决 flute/violin/cello 等谐波重叠类区分困难的问题。
+
+**输入特征变更 (重要)**：
+
+- 原有：Mel(128) + MFCC(13) = **141 通道**
+- 新增：Modgd-gram(128, Mel-scaled) = **128 通道**
+- 现在：**269 通道** — 模型首次接入相位信息
+
+**模型结构变更**：
+
+- **CNN 骨干 (不变)**：init_conv(1→32) → ResidualBlock(32→64) + Attention(64, r=2) → ResidualBlock(64→128) + Attention(128, r=4)
+- **[新版] 频率自适应池化 (新增)**：`AdaptiveAvgPool2d((36, None))` — 在 freq_proj 前标准化频率维度高度为 36，支持任意输入特征数
+- **频率卷积投影 (不变)**：Conv2d(128→256, kernel=(36,1)) → BN → ReLU
+- **时序编码器 (不变)**：PositionalEncoding(256) → TransformerEncoder(2层, 8头, d_model=256, FFN=1024)
+- **输出头 (不变)**：0.7×mean + 0.3×max → Dropout(0.3) → Linear(256, 10)
+- **总参数量：3,062,762**（未变 — AdaptiveAvgPool2d 无参数）
+
+**Modgd-gram 技术细节**：
+
+- 定义：`τ(k) = (X_R·Y_R + X_I·Y_I) / |S(k)|^{2γ}`，其中 X 是 STFT，Y 是加斜坡信号 n·x[n] 的 STFT
+- 平滑：3 抽头移动平均平滑幅度谱 |S(k)| 用于分母
+- Gamma 钳位：γ=0.3，防止分母过小导致数值不稳定
+- 逐帧归一化：每帧独立缩放到 [0, 1]
+- Mel 映射：1025 STFT bins → 128 Mel 频带（与 MelSpectrogram 一致）
+
+**修改的文件**：
+
+| 文件 | 修改内容 |
+|------|---------|
+| `src/config.py` | MODEL_VERSION→VER3.4_ModgdPhase, 新增 N_MODGD=128 |
+| `data/dataset.py` | 新增 `compute_modgd()` 方法、MelScale 变换、特征合并从 141→269 通道 |
+| `src/model.py` | 新增 `freq_adaptive_pool = AdaptiveAvgPool2d((36, None))` 在 freq_proj 前 |
+| `test/infer.py` | 新增 `compute_modgd()` 内联函数、特征合并 141→269、移除 piano→violin 门控 |
+
+**不做的改动**：
+
+- 不改训练超参数（LR=5e-4, FocalLoss gamma=2.0, Mixup, etc.）
+- 不改数据生成器（`build_mixed_dataset.py` 无需修改）
+- 不改 Loss 函数或优化器
+
+**预期**：Modgd 提供相位信息，使模型能区分谐波结构相似但相位响应不同的乐器（flute vs violin, cello vs piano）。预期 F1 从 86.03% 提升至 90%+。剩余差距计划通过 VER3.5 的 CQT/Chroma 音高感知特征补足。
+
+---
+
+## 待办（训练完成后更新）
+
+- [x] 记录最佳 Val F1 → **84.73%** (epoch 177), 最终 Val F1 收敛至 ~84.1%
+- [x] 逐类 F1 (epoch 177): drum set 0.940, singer 0.945, e.bass 0.852, e.guitar 0.877, ac.guitar 0.900, cello 0.767, piano 0.773, synth 0.862, flute 0.667, violin 0.747
+- [x] flute F1 0.67 (VER3.3 0.73) — Modgd 未显著改善 flute 混淆
+- [x] **标准对照集评估**: Micro F1 **0.539** — 暴露出合成训练集与真实混音的巨大领域差距！Recall 仅 0.39, Precision 0.86
+- [x] 核心问题: 合成混音(peak归一化)导致模型输出的概率无法迁移到真实录音 → VER3.5 修复
+
+---
+
+### 版本: VER3.5_RealMix (领域差距弥合)
+
+**目标**: 解决 VER3.4 在标准对照集上暴露的严重领域差距问题 (Val F1 0.84 → GT F1 0.54)。
+
+**根因分析** (来自 6 首标准对照歌曲评估):
+1. **Recall 灾难 (0.39)**: 模型在真实混音上严重欠检测 — 合成混音的 peak 归一化使训练样本中乐器音量不真实地一致
+2. **跨域降置信**: 模型在真实混音上输出概率系统性偏低 — 合成数据欠缺真实录音的动态范围和频谱平衡
+3. **典型幻觉**: electric guitar 在 4/6 首中幻现 (古典钢琴三重奏里检出电吉他!), electric bass 在 3/6 首中幻现
+4. **严重漏检**: drum set Recall=0.12, singer Recall=0.13, synthesizer Recall=0.03
+
+**修改内容**:
+
+| 文件 | 修改内容 |
+|------|---------|
+| `src/model.py` | 新增 `input_norm = InstanceNorm2d(1, affine=True)` 在 init_conv 前, 对每样本独立归一化，消除整体音量和频谱斜度差异 |
+| `data/build_mixed_dataset.py` | (1) 用 RMS 归一化替代 peak 归一化，保留乐器间相对响度 (2) 增益范围 0.6~1.0 → 0.25~1.0 (12dB动态) (3) 目标 RMS 随机化: 0.08~0.25 (乐器) / 0.03~0.12 (背景) (4) tanh 软削顶 |
+| `src/config.py` | MODEL_VERSION → VER3.5_RealMix, 新增 FEATURE_STATS_PATH |
+| `src/train.py` | 恢复 checkpoint 后 `scheduler.T_max = config.EPOCHS` 修复 smoke test 污染 |
+
+**核心创新**:
+1. **InstanceNorm2d 输入归一化**: 每个 spectrogram 独立归一化到 0 均值 1 方差，使模型对整体音量、频谱倾斜不敏感。这是弥合合成/真实混音差距的最关键一步。
+2. **真实化混音增强**: 不再让所有乐器"平等响亮"，而是模拟真实录音中某些乐器比其他的轻 12dB 的情况。
+
+**预期**: InstanceNorm + 真实化混音应显著提升召回率（目标从 0.39 → 0.65+），同时降低跨域幻觉。
+
+**不做的改动**: 不改架构 (Transformer 不变), 不改 Loss, 不改超参数。
+
+---
+
+### 版本: VER4.0_BinaryEnsemble (逐乐器二分类集成)
+
+**目标**: 放弃单模型多标签分类，改用 10 个独立的逐乐器二分类器。每个模型只学"这个乐器有没有"，从根本上解决类别不平衡和稀有类漏检问题。
+
+**核心架构变更**:
+- 旧方案: 一个 TransformerClassifier (3.06M 参数) 输出 10 维 logits → Focal Loss
+- 新方案: 10 个 BinaryInstrumentClassifier (72K 参数/个 = 0.73M 总参数，~4x 更小)
+
+**BinaryInstrumentClassifier 结构**:
+- `Conv2d(1→16) → BN → ReLU → ResidualBlock(16→32, stride=2) → ResidualBlock(32→64, stride=2) → AdaptiveAvgPool2d(1) → Dropout(0.3) → Linear(64, 1)`
+- 参数量: 72,497 / 模型
+- 训练: BCEWithLogitsLoss, Adam(lr=1e-3), 30 epochs
+
+**训练策略 —— 三阶段方案**:
+
+1. **纯净音轨训练 (Clean Stem Training)**:
+   - 从 MedleyDB 提取 4185 个 3 秒纯净音轨片段 (每类 120-720)
+   - 每个二分类器用正样本(该类) + 等量负样本(所有其他类) 1:1 平衡训练
+   - 80/20 切分验证，每 epoch ~1 秒
+
+2. **逐类验证 (Per-Instrument Validation)**:
+   - 在纯净音轨验证集上所有 10 类 F1 > 0.94
+   - drum set 和 singer 达到 1.000
+
+3. **集成推理 (Ensemble Inference)**:
+   - 10 个模型并行推理，sigmoid 概率合并
+   - 逐窗 3 帧平滑
+   - 按类独立阈值
+
+**纯净音轨验证结果 (30 Epochs)**:
+
+| 乐器 | Val F1 |
+|------|--------|
+| acoustic guitar | **0.969** |
+| cello | **0.947** |
+| drum set | **1.000** |
+| electric bass | **0.984** |
+| electric guitar | **0.997** |
+| flute | **0.985** |
+| piano | **0.987** |
+| singer | **1.000** |
+| synthesizer | **0.977** |
+| violin | **0.959** |
+
+**标准对照集评估 (6 首真实混音)**:
+
+| 歌曲 | VER3.5 | VER4.0 | Δ |
+|------|--------|--------|---|
+| medleydb_not_for_nothing | 0.440 | **0.589** | +34% |
+| medleydb_piano_trio | 0.636 | **0.767** | +21% |
+| medleydb_violin_sonata | 0.676 | **0.715** | +6% |
+| medleydb_vivaldi | 0.426 | **0.602** | +41% |
+| moisesdb_electronic | 0.470 | **0.741** | +58% |
+| moisesdb_sunspot | 0.436 | **0.666** | +53% |
+| **Global** | **0.527** | **~0.68** | **+29%** |
+
+**关键成功因素**:
+1. **每类独立学习**: 合成器从多标签方案的 F1 0.0 跃升至 0.977 (纯净音轨验证)，真实混音中也从几乎不可检测到能检出
+2. **平衡训练**: 1:1 正负采样消除了类别不平衡——每类都在同等数据量下训练
+3. **纯净音轨作为锚点**: 模型先学会"这乐器的纯音色长什么样"，再在混音中泛化
+4. **模块化**: 任何乐器效果不好可单独重训，不影响其他 9 个
+
+**待改进**:
+1. 部分乐器 (drum set, piano, electric bass) 在真实混音中 recall 仍偏低——需要微调阶段用真实混音做 domain adaptation
+2. 阈值需要针对真实混音重新校准（当前用纯净音轨最优阈值不一定适配混音场景）
+3. 评估数据有限 (仅 6 首对照歌)
+
+**总参数量**: 0.73M (vs VER3.5 的 3.06M，缩小 76%)
+**总训练时间**: ~5 分钟 (10 类 × 30 秒)
+**模型存储**: 2.9 MB (vs 37 MB checkpoint，缩小 92%)
+
+---
