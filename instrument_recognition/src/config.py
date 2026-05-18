@@ -5,7 +5,7 @@ import torch
 class Config:
     def __init__(self):
         self.WORKSPACE_DIR = r"D:\program_project\MUSE\instrument_recognition"
-        self.MODEL_VERSION = "VER4.0_RealMix"
+        self.MODEL_VERSION = "VER4.0_BinaryEnsemble"
         self.DATASET_VERSION = "V3_SyntheticStems"
         self.DATASET_DIR = r"D:\program_project\MUSE\data\MedleyDB"  # 丢弃劣质 IRMAS，锁定高质分离音轨
         self.CACHE_DIR = r"D:\program_project\MUSE\data\preprocessed_cache"
