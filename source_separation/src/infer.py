@@ -64,17 +64,22 @@ def separate(mix_audio, model, device=None):
         win_length=N_FFT, window=window,
         return_complex=True
     )  # [F, T_frames]
-    mag = torch.abs(X)  # [F, T_frames]
-    phase = torch.angle(X)
+    # 注: 在 DeepSeek CUDA 下 torch.abs(complex) 会编译失败，手动计算
+    X_real = X.real
+    X_imag = X.imag
+    mag = torch.sqrt(X_real ** 2 + X_imag ** 2)  # [F, T_frames]
+    # 将 phase 计算延后到重建时直接使用 real/imag
 
     # 模型推理 → 掩码
     mag_input = mag.unsqueeze(0)  # [1, F, T]
     mask = model(mag_input).squeeze(0)  # [F, T]
 
-    # 应用掩码 + 重建复数谱
+    # 应用掩码 + 重建复数谱（直接用 real/imag，避免 angle）
     mag_hat = mask * mag
-    real = mag_hat * torch.cos(phase)
-    imag = mag_hat * torch.sin(phase)
+    cos_theta = X_real / torch.clamp(mag, min=1e-8)
+    sin_theta = X_imag / torch.clamp(mag, min=1e-8)
+    real = mag_hat * cos_theta
+    imag = mag_hat * sin_theta
     complex_spec = torch.complex(real, imag)
 
     # iSTFT
