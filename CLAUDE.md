@@ -55,31 +55,38 @@ Current active branch: `ir/ver3.0`. Main branch (`main`) is reserved for stable/
 
 ### Model: 10× BinaryInstrumentClassifier (Ensemble)
 - **Architecture**: Conv2d(1→16) → BN → ReLU → ResidualBlock(16→32, stride=2) → ResidualBlock(32→64, stride=2) → AdaptiveAvgPool2d → Dropout(0.3) → Linear(64, 1)
+- **Input features**: Mel(128) + MFCC(13) + Modgd(128) = 269 channels
 - **Params per model**: ~72K (10 models = 0.73M total — 76% smaller than VER3.5's 3.06M)
 - **Storage**: 2.9 MB total (92% smaller than 37 MB checkpoint)
-- **Training**: BCEWithLogitsLoss, Adam(lr=1e-3), 30 epochs, 1:1 balanced pos/neg sampling
-- **Inference**: All 10 models run per window; sigmoid output thresholded independently
+- **Training (Stage 1)**: BCEWithLogitsLoss, Adam(lr=1e-3), 30 epochs, 1:1 balanced pos/neg sampling on clean stems
+- **Training (Stage 2)**: Real mix fine-tuning, Adam(lr=1e-4), 15+5 epochs HNM, MedleyDB+MoisesDB combined dataset
+- **Inference**: All 10 models run per window; sigmoid output thresholded independently + post-processing (co-occurrence gating, freq-band gating, min duration 2 frames)
 
 ### Training Strategy (3-stage)
-1. **Clean stem pre-training**: 4185 extracts from MedleyDB (120-720 per class)
-2. **Per-instrument validation**: All 10 models >0.94 Val F1 on clean stems
-3. **Ensemble inference**: 10 models → merged multi-label output, per-class threshold
+1. **Clean stem pre-training**: 4185 extracts from MedleyDB (120-720 per class) — `src/btrain.py`
+2. **Real mix fine-tuning**: MedleyDB(74) + MoisesDB(240) = 20000 train windows — `src/bfinetune.py`
+3. **Ensemble inference**: 10 models → merged multi-label output, per-class threshold + post-processing
 
 ### Files
 | File | Purpose |
 |------|---------|
-| `src/binary_model.py` | BinaryInstrumentClassifier definition (~72K params) |
-| `src/binary_train.py` | Training script (single instrument) |
-| `src/train_all_binary.py` | Batch train all 10 instruments |
-| `test/binary_infer.py` | Ensemble inference (load all 10 models) |
-| `test/binary_eval_gt.py` | Ground truth evaluation |
+| `src/bmodel.py` | BinaryInstrumentClassifier definition (~72K params) |
+| `src/btrain.py` | Stage 1 clean stem training |
+| `src/bfinetune.py` | Stage 2 real mix fine-tuning + HNM |
+| `src/finetune_all.py` | Batch run Stage 2 for all instruments |
+| `src/train_all.py` | Batch run Stage 1 for all instruments |
+| `test/binfer.py` | Ensemble inference (load all 10 models) |
+| `test/binfer_cli.py` | CLI inference with Gantt chart output |
+| `test/beval.py` | Ground truth evaluation |
 | `data/build_clean_stems.py` | Clean stem extraction from MedleyDB |
+| `data/build_moisesdb_real_mixes.py` | Real mix extraction from MoisesDB |
+| `data/combine_real_mixes.py` | Combine MedleyDB + MoisesDB datasets |
 | `model/binary/*.pth` | 10 trained model checkpoints |
 
 ### 10 Classes
 acoustic guitar, cello, drum set, electric bass, electric guitar, flute, piano, singer, synthesizer, violin
 
-### Ground Truth Results (vs VER3.5)
+### Ground Truth Results (vs VER3.5, Stage 2 + MoisesDB)
 | Song | VER3.5 | VER4.0 | Δ |
 |------|--------|--------|---|
-| Global Micro F1 | 0.527 | **~0.68** | **+29%** |
+| Global Micro F1 | 0.527 | **0.791** | **+50%** |

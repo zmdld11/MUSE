@@ -25,7 +25,10 @@ EPOCHS = 15
 LR = 1e-4
 STEM_MIX_RATIO = 0.2  # 混入 20% 纯净音轨防止遗忘
 
-MIX_DIR = r"D:\program_project\MUSE\data\muse_real_mixed_dataset"
+MIX_DIR = r"D:\program_project\MUSE\data\muse_real_mixed_dataset_combined"
+if not os.path.exists(os.path.join(MIX_DIR, "labels.json")):
+    MIX_DIR = r"D:\program_project\MUSE\data\muse_real_mixed_dataset"
+    print(f"  未找到合并数据集，回退到 {MIX_DIR}")
 STEM_DIR = r"D:\program_project\MUSE\data\clean_stems"
 CACHE_DIR = r"D:\program_project\MUSE\data\preprocessed_cache\binary_feats"
 MODEL_DIR = r"D:\program_project\MUSE\instrument_recognition\model\binary"

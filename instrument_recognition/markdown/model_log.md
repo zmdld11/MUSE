@@ -606,3 +606,75 @@
 **模型存储**: 2.9 MB (vs 37 MB checkpoint，缩小 92%)
 
 ---
+
+### VER4.0_BinaryEnsemble — Stage 2 真实混音微调 + MoisesDB 扩充数据
+
+**目标**: 解决合成/真实混音领域差距 (Ground Truth F1 从 0.54→0.79)，补充合成器训练数据。
+
+**Stage 2 微调**:
+- 在 `muse_real_mixed_dataset` (MedleyDB 74 首歌, ~25K 窗口) 上做微调
+- 1:1 平衡正负采样，正样本=该类活跃窗口，负样本=其他乐器活跃但该类不活跃的窗口
+- 15 epochs + 5 epochs 困难负样本挖掘 (HNM)
+- BCEWithLogitsLoss, Adam(lr=1e-4), CosineAnnealingLR
+- 混入 20% 纯净音轨防止灾难性遗忘
+
+**MoisesDB 数据扩充 (2026-05-18)**:
+- 新增 dataset: `muse_real_mixed_dataset_combined` — MedleyDB + MoisesDB 合并
+- 整合 240 首 MoisesDB 真实歌曲 (~204s/首)，各分轨叠加为全混音 + RMS 活动检测
+- 最终: **20,000 训练窗口 + 22,752 验证窗口** (sqrt 平衡采样)
+- MoisesDB 贡献大量合成器 (2681 vs 原来 36) 和长笛数据
+
+**Stage 2 微调结果 (10 乐器, 合并数据集)**:
+
+| 乐器 | Best Val F1 |
+|------|:----------:|
+| acoustic guitar | 0.932 |
+| cello | **0.980** |
+| drum set | 0.969 |
+| electric bass | 0.959 |
+| electric guitar | 0.907 |
+| flute | **0.983** |
+| piano | 0.898 |
+| singer | 0.939 |
+| **synthesizer** | **0.814** (from 0.255) |
+| violin | 0.938 |
+
+**标准对照集评估 (6 首真实混音歌曲, 跨曲汇总)**:
+
+| 乐器 | F1 | TP | FP | FN | 分析 |
+|------|:--:|:--:|:--:|:--:|------|
+| drum set | **0.979** | 1370 | 32 | 27 | 优秀,几乎无幻觉 |
+| violin | **0.954** | 2726 | 224 | 38 | 优秀 |
+| singer | **0.915** | 1127 | 152 | 57 | 优秀 |
+| piano | 0.810 | 2290 | 1033 | 43 | FP偏多(低音泛音触发) |
+| electric bass | 0.793 | 978 | 508 | 3 | FP因钢琴低音共混 |
+| acoustic guitar | 0.792 | 847 | 404 | 42 | FP来自electric guitar混淆 |
+| cello | 0.687 | 1144 | 1038 | 5 | FP严重(与violin混淆) |
+| electric guitar | 0.655 | 505 | 503 | 29 | FP/FN均衡偏低 |
+| synthesizer | **0.411** | 448 | 1285 | 0 | FP大幅削减仍有1285(之前2604) |
+| flute | **0.179** | 72 | 89 | 573 | 严重漏检, 混音中被掩盖 |
+| **Global Micro F1** | **0.791** | 11507 | 5268 | 817 | +50% vs VER3.5基线(0.527) |
+
+**与 VER3.5 对比**:
+- 全局 F1: 0.527 → **0.791** (+50%)
+- synthesizer: 几乎不可检出 → 0.411 (FP从2604降至1285)
+- 所有 6 首歌曲均有显著提升
+
+**当前已知问题**:
+
+1. **Flute 严重漏检 (F1=0.179, FN=573)**: 69% 的 flute 窗口未被检出。根源: flute 在混音中能量偏小，且频段与 singer/violin 重叠。模型被其他强能量乐器 (drums、piano) 压制。需要音高感知特征 (CQT) 或专门数据增强。
+
+2. **Cello 误报 (F1=0.687, FP=1038)**: FP 是 TP 的 90%。cello/violin 同为弓弦乐器，谐波结构高度相似。单靠 Mel+MFCC+Modgd 幅度谱难以区分。
+
+3. **Synthesizer FP 仍偏高 (FP=1285)**: 虽然从原来的 2604 降下来了，但 FP 仍是 TP 的 2.9 倍。MoisesDB 数据帮助显著 (F1 0.255→0.411)，但 MoisesDB 的 synth 音色偏音乐化(lead/pad)，与背景噪音混淆。
+
+4. **Piano FP 多 (FP=1033)**: 钢琴低音泛音触发 electric bass，高音泛音触发 violin。频段门控规则已缓解部分，但规则硬编码有时误杀真实检出。
+
+5. **Electric/acoustic guitar 混淆**: 两把吉他音色在混音中互相干扰。clean electric guitar 和 acoustic guitar 的前级特征过于相似。
+
+6. **后处理门控依赖经验规则**: Co-occurrence 和频段门控阈值是手动调的，可能在新歌曲中产生意外抑制。
+
+**下一步方向 (音轨分离)**:
+当前模型对吉他 (acoustic + electric + bass) 的综合检测能力已满足作为音轨分离条件信号的需求。建议进入 source_separation 模块开发。
+
+---
