@@ -15,10 +15,20 @@ from src.model import LightweightUMX
 from src.dataset import GuitarSeparationDataset
 
 
+def compute_sdr(est_mag, target_mag, eps=1e-8):
+    """幅度谱 SDR: 10*log10(||target||² / ||error||²)"""
+    error = est_mag - target_mag
+    s_target = (target_mag ** 2).sum()
+    s_error = (error ** 2).sum()
+    sdr = 10 * torch.log10(s_target / torch.clamp(s_error, min=eps))
+    return sdr.item()
+
+
 def train(args):
     device = config.DEVICE
     print(f"设备: {device}")
     print(f"版本: {config.MODEL_VERSION}")
+    print(f"基准指标: SDR (幅度谱)")
 
     # 数据集
     metadata_path = os.path.join(config.DATASET_DIR, "metadata.json")
@@ -74,10 +84,11 @@ def train(args):
     )
 
     start_epoch = 0
-    best_val_loss = float('inf')
+    best_val_sdr = -float('inf')  # SDR 越大越好
     epochs_no_improve = 0
     train_losses = []
     val_losses = []
+    val_sdrs = []
 
     # 恢复训练
     ckpt_path = os.path.join(config.MODEL_DIR, "checkpoint_latest.pth")
@@ -88,10 +99,11 @@ def train(args):
         if "scheduler_state_dict" in ckpt:
             scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         start_epoch = ckpt["epoch"]
-        best_val_loss = ckpt["best_val_loss"]
+        best_val_sdr = ckpt.get("best_val_sdr", -float('inf'))
         train_losses = ckpt.get("train_losses", [])
         val_losses = ckpt.get("val_losses", [])
-        print(f"从 epoch {start_epoch} 恢复, 最佳 Val Loss: {best_val_loss:.4f}")
+        val_sdrs = ckpt.get("val_sdrs", [])
+        print(f"从 epoch {start_epoch} 恢复, 最佳 Val SDR: {best_val_sdr:.2f} dB")
 
     # 日志
     log_path = os.path.join(
@@ -104,7 +116,8 @@ def train(args):
         f.write(f"Parameters: {n_params:,}\n")
         f.write(f"Train samples: {len(train_dataset)}\n")
         f.write(f"Val samples: {len(val_dataset)}\n")
-        f.write("Epoch\tTrain_L1\tVal_L1\tLR\n")
+        f.write(f"Metric: SDR (higher is better)\n")
+        f.write("Epoch\tTrain_L1\tVal_L1\tVal_SDR(dB)\tLR\n")
 
     # 训练循环
     for epoch in range(start_epoch, config.EPOCHS):
@@ -129,37 +142,50 @@ def train(args):
         # —— Val ——
         model.eval()
         val_loss = 0.0
+        val_sdr_total = 0.0
         with torch.no_grad():
-            for mix_mag, _, target_mask in val_loader:
+            for mix_mag, _, target_mask in tqdm(
+                val_loader, desc=f"Val {epoch+1}/{config.EPOCHS}", leave=False
+            ):
                 mix_mag = mix_mag.to(device)
                 target_mask = target_mask.to(device)
                 pred_mask = model(mix_mag)
+
                 val_loss += criterion(pred_mask, target_mask).item()
 
-        val_loss /= len(val_loader)
+                # 计算 SDR: 恢复幅度后对比
+                guitar_pred_mag = pred_mask * mix_mag          # [B, F, T]
+                guitar_target_mag = target_mask * mix_mag      # [B, F, T]
+                batch_sdr = compute_sdr(guitar_pred_mag, guitar_target_mag)
+                val_sdr_total += batch_sdr * mix_mag.size(0)   # 按样本加权
 
-        # 调度器
+        val_loss /= len(val_loader)
+        val_sdr = val_sdr_total / len(val_dataset)  # 全局平均
+
+        # 调度器（loss 降低不代表 SDR 一定提升，但仍用 loss 做 lr schedule）
         current_lr = optimizer.param_groups[0]['lr']
         scheduler.step(val_loss)
 
         # 日志
-        print(f"  Epoch {epoch+1}: Train L1={train_loss:.4f}, Val L1={val_loss:.4f}, LR={current_lr:.2e}")
+        print(f"  Epoch {epoch+1}: L1={train_loss:.4f}/{val_loss:.4f}  SDR={val_sdr:.2f} dB  LR={current_lr:.2e}")
         with open(log_path, "a") as f:
-            f.write(f"{epoch+1}\t{train_loss:.4f}\t{val_loss:.4f}\t{current_lr:.2e}\n")
+            f.write(f"{epoch+1}\t{train_loss:.4f}\t{val_loss:.4f}\t{val_sdr:.2f}\t{current_lr:.2e}\n")
 
         train_losses.append(train_loss)
         val_losses.append(val_loss)
+        val_sdrs.append(val_sdr)
 
-        # 保存最佳模型
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        # 保存最佳模型（以 SDR 为准）
+        if val_sdr > best_val_sdr:
+            best_val_sdr = val_sdr
             epochs_no_improve = 0
             torch.save({
                 "model_state_dict": model.state_dict(),
+                "val_sdr": val_sdr,
                 "val_loss": val_loss,
                 "version": config.MODEL_VERSION,
             }, os.path.join(config.MODEL_DIR, "guitar.pth"))
-            print(f"    → 保存最佳模型 (Val L1={val_loss:.4f})")
+            print(f"    → 保存最佳模型 (SDR={val_sdr:.2f} dB)")
         else:
             epochs_no_improve += 1
 
@@ -169,20 +195,21 @@ def train(args):
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict(),
-            "best_val_loss": best_val_loss,
+            "best_val_sdr": best_val_sdr,
             "train_losses": train_losses,
             "val_losses": val_losses,
+            "val_sdrs": val_sdrs,
         }, ckpt_path)
 
         # Early stopping
         if epochs_no_improve >= config.EARLY_STOPPING_PATIENCE:
-            print(f"Early stopping at epoch {epoch+1} (no improvement for {epochs_no_improve} epochs)")
+            print(f"Early stopping at epoch {epoch+1} (SDR no improvement for {epochs_no_improve} epochs)")
             break
 
     # 结束
-    print(f"\n训练完成! 最佳 Val L1: {best_val_loss:.4f}")
+    print(f"\n训练完成! 最佳 Val SDR: {best_val_sdr:.2f} dB")
     with open(log_path, "a", encoding="utf-8") as f:
-        f.write(f"Best Val L1: {best_val_loss:.4f}\n")
+        f.write(f"Best Val SDR: {best_val_sdr:.2f} dB\n")
 
 
 if __name__ == "__main__":
