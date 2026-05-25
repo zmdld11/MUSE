@@ -1,80 +1,82 @@
-# model.py — UNet: 频域 2D U-Net 音轨分离模型
-# VER2.0: 复数谱输入 → 2D Conv U-Net → 复数掩码
+# model.py — DemucsLM: 轻量时域 Demucs 音轨分离模型
+# VER3.0: 1D Conv U-Net, GLU 门控, LSTM 瓶颈
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
-class ConvBlock(nn.Module):
-    def __init__(self, cin, cout, stride=(2, 2)):
-        super().__init__()
-        self.cv = nn.Conv2d(cin, cout, 5, stride=stride, padding=2)
-        self.bn = nn.BatchNorm2d(cout)
-        self.rl = nn.ReLU(inplace=True)
-
-    def forward(self, x):
-        return self.rl(self.bn(self.cv(x)))
-
-
-class DeconvBlock(nn.Module):
+class EncBlock(nn.Module):
     def __init__(self, cin, cout):
         super().__init__()
-        self.dc = nn.ConvTranspose2d(cin, cout, 4, stride=2, padding=1)
-        self.bn = nn.BatchNorm2d(cout)
-        self.rl = nn.ReLU(inplace=True)
-
-    def forward(self, x, target_size):
-        x = self.dc(x)
-        if x.shape[-2:] != target_size:
-            x = nn.functional.interpolate(x, size=target_size, mode='bilinear', align_corners=False)
-        return self.rl(self.bn(x))
-
-
-class UNet(nn.Module):
-    """频域 2D U-Net 复数掩码分离模型
-
-    输入: [B, 2, F, T] 混合音频复数 STFT (real+imag)
-    输出: [B, 2, F, T] 复数掩码 [-1, 1] (real+imag)
-    """
-    def __init__(self, channels=(48, 96, 192)):
-        super().__init__()
-        c1, c2, c3 = channels
-
-        # Encoder
-        self.enc1 = ConvBlock(2, c1, stride=(2, 2))   # [48, 257, 130]
-        self.enc2 = ConvBlock(c1, c2, stride=(2, 2))  # [96, 129, 65]
-        self.enc3 = ConvBlock(c2, c3, stride=(2, 2))  # [192, 65, 33]
-
-        # Bottleneck
-        self.bn1 = nn.Conv2d(c3, c3, 3, padding=1)
-        self.bn2 = nn.Conv2d(c3, c3, 3, padding=1)
-
-        # Decoder
-        self.dec3 = DeconvBlock(c3 * 2, c2)  # concat skip
-        self.dec2 = DeconvBlock(c2 * 2, c1)
-        self.dec1 = nn.ConvTranspose2d(c1 * 2, 2, 4, stride=2, padding=1)
-        # 初始偏置 +2.0 → tanh(2)≈0.96 → 初始掩码非零，加速收敛
-        nn.init.constant_(self.dec1.bias, 2.0)
+        self.conv = nn.Conv1d(cin, cout * 2, 8, stride=4, padding=2)
 
     def forward(self, x):
-        """
-        x: [B, 2, F, T] 复数 STFT
-        returns: [B, 2, F, T] 复数掩码
-        """
-        # Encoder
-        e1 = self.enc1(x)   # [B, 48, ~257, ~130]
-        e2 = self.enc2(e1)  # [B, 96, ~129, ~65]
-        e3 = self.enc3(e2)  # [B, 192, ~65, ~33]
+        x = self.conv(x)
+        a, b = x.chunk(2, dim=1)
+        return a * torch.sigmoid(b)
 
-        # Bottleneck
-        b = self.bn1(e3)
-        b = nn.functional.relu_(b)
-        b = self.bn2(b)
-        b = nn.functional.relu_(b)
 
-        # Decoder with skip
-        d3 = self.dec3(torch.cat([b, e3], dim=1), e2.shape[-2:])  # [B, 96, ~129, ~65]
-        d2 = self.dec2(torch.cat([d3, e2], dim=1), e1.shape[-2:])  # [B, 48, ~257, ~130]
-        d1 = self.dec1(torch.cat([d2, e1], dim=1))  # [B, 2, F, T]
-        d1 = nn.functional.interpolate(d1, size=x.shape[-2:], mode='bilinear', align_corners=False)
+class DecBlock(nn.Module):
+    def __init__(self, cin, cout, skip_ch):
+        super().__init__()
+        self.conv = nn.ConvTranspose1d(cin, cout * 2, 8, stride=4, padding=2)
+        if skip_ch != cout * 2:
+            self.skip_proj = nn.Conv1d(skip_ch, cout * 2, 1)
+        else:
+            self.skip_proj = None
 
-        return torch.tanh(d1)
+    def forward(self, x, skip):
+        x = self.conv(x)
+        if x.shape[-1] != skip.shape[-1]:
+            x = F.interpolate(x, size=skip.shape[-1], mode='linear', align_corners=False)
+        if self.skip_proj is not None:
+            skip = self.skip_proj(skip)
+            skip = F.interpolate(skip, size=x.shape[-1], mode='linear', align_corners=False)
+        x = x + skip
+        a, b = x.chunk(2, dim=1)
+        return a * torch.sigmoid(b)
+
+
+class DemucsLM(nn.Module):
+    """时域 Demucs 轻量版 — 1D Conv U-Net + LSTM 瓶颈"""
+    def __init__(self, channels=(16, 32, 64, 128, 256)):
+        super().__init__()
+        self.encs = nn.ModuleList()
+        cin = 1
+        for cout in channels:
+            self.encs.append(EncBlock(cin, cout))
+            cin = cout
+
+        self.lstm = nn.LSTM(channels[-1], channels[-1], bidirectional=True, batch_first=True)
+
+        # Decoder: 从 LSTM 输出 channels[-1]*2 → 递减到 1
+        lstm_out = channels[-1] * 2
+        self.decs = nn.ModuleList()
+        # 第一层从 LSTM 输出进入
+        self.decs.append(DecBlock(lstm_out, channels[-2], channels[-1]))
+        # 中间层
+        for i in range(len(channels) - 2, 0, -1):
+            self.decs.append(DecBlock(channels[i], channels[i - 1], channels[i]))
+        # 最后一层输出到 1 通道
+        self.decs.append(DecBlock(channels[0], 1, channels[0]))
+        self.out = nn.Conv1d(1, 1, 1)
+
+    def forward(self, x):
+        orig_len = x.shape[-1]
+        skips = []
+        for enc in self.encs:
+            x = enc(x)
+            skips.append(x)
+        skips = skips[::-1]
+
+        x = x.permute(0, 2, 1)
+        x, _ = self.lstm(x)
+        x = x.permute(0, 2, 1)
+
+        for dec, skip in zip(self.decs, skips):
+            x = dec(x, skip)
+
+        x = self.out(x)
+        if x.shape[-1] != orig_len:
+            x = F.interpolate(x, size=orig_len, mode='linear', align_corners=False)
+        return x

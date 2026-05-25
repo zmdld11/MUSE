@@ -1,6 +1,6 @@
-# train.py — UNet 吉他分离训练主循环
-# VER2.0: 复数 2D U-Net + 复数谱输入
-import os, argparse, json
+# train.py — DemucsLM 时域训练主循环
+# VER3.0: 端到端波形 L1 损失，无需 STFT
+import os, argparse
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -8,35 +8,16 @@ from tqdm import tqdm
 from datetime import datetime
 
 from src.config import config
-from src.model import UNet
+from src.model import DemucsLM
 from src.dataset import GuitarSeparationDataset
 
-N_FFT = 1024
-HOP = 256
-GPU_WINDOW = None
 
-
-def _stft(audio):
-    """GPU 复数 STFT [B, T] → (mag [B, F, T], real [B, F, T], imag [B, F, T])"""
-    global GPU_WINDOW
-    d = audio.device
-    if GPU_WINDOW is None or GPU_WINDOW.device != d:
-        GPU_WINDOW = torch.hann_window(N_FFT, device=d)
-    X = torch.stft(audio, N_FFT, HOP, window=GPU_WINDOW, return_complex=True)
-    mag = torch.sqrt(X.real ** 2 + X.imag ** 2 + 1e-8)
-    return mag, X.real, X.imag
-
-
-def apply_complex_mask(comp_mask, real, imag):
-    """(a+jb)(c+jd) = (ac-bd) + j(ad+bc)"""
-    r = comp_mask[:, 0] * real - comp_mask[:, 1] * imag
-    i = comp_mask[:, 0] * imag + comp_mask[:, 1] * real
-    return r, i
-
-
-def compute_sdr(est_mag, target_mag):
-    err = est_mag - target_mag
-    return (10 * torch.log10((target_mag ** 2).sum() / torch.clamp((err ** 2).sum(), min=1e-8))).item()
+def compute_sdr(est, target, eps=1e-8):
+    err = est - target
+    s = (target ** 2).sum()
+    e = (err ** 2).sum()
+    if s < eps: return 0.0  # target 全静音 → SDR 无意义
+    return (10 * torch.log10(s / torch.clamp(e, min=eps))).item()
 
 
 def train(args):
@@ -45,11 +26,6 @@ def train(args):
     print(f"版本: {config.MODEL_VERSION}")
 
     data_dir = config.DATASET_DIR
-    if not os.path.exists(os.path.join(data_dir, "metadata.json")):
-        print(f"错误: 数据集不存在 {data_dir}")
-        print("请先运行 python data/build_dataset.py")
-        return
-
     train_ds = GuitarSeparationDataset(data_dir, "train", augment=True)
     val_ds = GuitarSeparationDataset(data_dir, "val", augment=False)
     print(f"训练: {len(train_ds)}, 验证: {len(val_ds)}")
@@ -57,7 +33,7 @@ def train(args):
     tl = DataLoader(train_ds, config.BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True)
     vl = DataLoader(val_ds, config.BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True, persistent_workers=True)
 
-    model = UNet(channels=config.UNET_CHANNELS).to(device)
+    model = DemucsLM(channels=config.DEMUCS_CHANNELS).to(device)
     n_p = sum(p.numel() for p in model.parameters())
     print(f"参数量: {n_p:,}")
 
@@ -87,46 +63,28 @@ def train(args):
         f.write("Epoch\tTrain_L1\tVal_SDR(dB)\tLR\n")
 
     for epoch in range(start_epoch, config.EPOCHS):
-        # —— Train ——
         model.train()
         train_loss = 0.0
         for mix, gtr in tqdm(tl, desc=f"E{epoch+1}/{config.EPOCHS}", leave=False):
             mix, gtr = mix.to(device, non_blocking=True), gtr.to(device, non_blocking=True)
+            mix = mix.unsqueeze(1)  # [B, 1, T]
+            gtr = gtr.unsqueeze(1)
 
-            # GPU 复数 STFT
-            mix_mag, mix_r, mix_i = _stft(mix)
-            _, gtr_r, gtr_i = _stft(gtr)
-            gtr_mag = torch.sqrt(gtr_r ** 2 + gtr_i ** 2 + 1e-8)
-
-            # U-Net 输入: [B, 2, F, T]
-            spec_in = torch.stack([mix_r, mix_i], dim=1)
-            mask = model(spec_in)
-
-            # 复数掩码 → 重建吉他
-            r_hat, i_hat = apply_complex_mask(mask, mix_r, mix_i)
-            recon_mag = torch.sqrt(r_hat ** 2 + i_hat ** 2 + 1e-8)
-
-            loss = criterion(recon_mag, gtr_mag)
             opt.zero_grad()
+            pred = model(mix)  # [B, 1, T]
+            loss = criterion(pred, gtr)
             loss.backward()
             opt.step()
             train_loss += loss.item()
         train_loss /= len(tl)
 
-        # —— Val ——
         model.eval()
         val_sdr = 0.0
         with torch.no_grad():
             for mix, gtr in tqdm(vl, desc=f"V{epoch+1}", leave=False):
                 mix, gtr = mix.to(device, non_blocking=True), gtr.to(device, non_blocking=True)
-                mix_mag, mix_r, mix_i = _stft(mix)
-                _, gtr_r, gtr_i = _stft(gtr)
-                gtr_mag = torch.sqrt(gtr_r ** 2 + gtr_i ** 2 + 1e-8)
-
-                mask = model(torch.stack([mix_r, mix_i], dim=1))
-                r_hat, i_hat = apply_complex_mask(mask, mix_r, mix_i)
-                recon_mag = torch.sqrt(r_hat ** 2 + i_hat ** 2 + 1e-8)
-                val_sdr += compute_sdr(recon_mag, gtr_mag) * mix.size(0)
+                pred = model(mix.unsqueeze(1))
+                val_sdr += compute_sdr(pred, gtr.unsqueeze(1)) * mix.size(0)
         val_sdr /= len(val_ds)
         lr = opt.param_groups[0]['lr']
         sched.step(-val_sdr)

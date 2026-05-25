@@ -5,23 +5,20 @@ import torch
 class Config:
     def __init__(self):
         self.WORKSPACE_DIR = r"D:\program_project\MUSE\source_separation"
-        self.MODEL_VERSION = "VER2.0_UNet"
+        self.MODEL_VERSION = "VER3.0_DemucsLM"
         self.TARGET_INSTRUMENT = "guitar"  # acoustic + electric 合并
 
         # Audio params
         self.SR = 22050
         self.DURATION = 3  # seconds
-        self.N_FFT = 1024
-        self.HOP_LENGTH = 256
-        self.N_BINS = self.N_FFT // 2 + 1  # 513
 
         # Model params
-        self.UNET_CHANNELS = (48, 96, 192)
+        self.DEMUCS_CHANNELS = (16, 32, 64, 128, 256)
 
         # Train params
-        self.BATCH_SIZE = 64
+        self.BATCH_SIZE = 16
         self.EPOCHS = 100
-        self.LR = 1e-4
+        self.LR = 3e-4
         self.WEIGHT_DECAY = 1e-5
         self.EARLY_STOPPING_PATIENCE = 10
         self.SCHEDULER_PATIENCE = 3
