@@ -12,7 +12,6 @@ from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.config import config
-from src.model import LightweightUMX
 from src.infer import separate, load_model, N_FFT, HOP_LENGTH
 from src.dataset import compute_mag, get_stft, GuitarSeparationDataset
 

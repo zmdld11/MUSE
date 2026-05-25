@@ -5,7 +5,7 @@ import torch
 class Config:
     def __init__(self):
         self.WORKSPACE_DIR = r"D:\program_project\MUSE\source_separation"
-        self.MODEL_VERSION = "VER1.0_LightweightUMX"
+        self.MODEL_VERSION = "VER2.0_UNet"
         self.TARGET_INSTRUMENT = "guitar"  # acoustic + electric 合并
 
         # Audio params
@@ -16,20 +16,19 @@ class Config:
         self.N_BINS = self.N_FFT // 2 + 1  # 513
 
         # Model params
-        self.BLSTM_HIDDEN = 128
-        self.BLSTM_LAYERS = 1
+        self.UNET_CHANNELS = (48, 96, 192)
 
         # Train params
         self.BATCH_SIZE = 64
         self.EPOCHS = 100
-        self.LR = 3e-4
+        self.LR = 1e-4
         self.WEIGHT_DECAY = 1e-5
-        self.EARLY_STOPPING_PATIENCE = 15
-        self.SCHEDULER_PATIENCE = 5
+        self.EARLY_STOPPING_PATIENCE = 10
+        self.SCHEDULER_PATIENCE = 3
         self.SCHEDULER_FACTOR = 0.5
 
         # Data paths
-        self.DATASET_DIR = r"D:\program_project\MUSE\data\separation_dataset"
+        self.DATASET_DIR = os.path.join(self.WORKSPACE_DIR, "data")
         self.MODEL_DIR = os.path.join(self.WORKSPACE_DIR, "model")
         self.LOG_DIR = os.path.join(self.MODEL_DIR, "log")
         self.OUTPUT_DIR = os.path.join(self.WORKSPACE_DIR, "output")

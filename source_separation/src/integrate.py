@@ -4,8 +4,6 @@ import os
 import sys
 import torch
 import torch.nn as nn
-import torchaudio
-import torchaudio.transforms as T
 import numpy as np
 
 # 通过文件路径直接导入 BinaryInstrumentClassifier，避免与 source_separation 的 src 包冲突
@@ -19,22 +17,20 @@ _bmodel_spec.loader.exec_module(_bmodel)
 BinaryInstrumentClassifier = _bmodel.BinaryInstrumentClassifier
 
 from src.config import config
-from src.model import LightweightUMX
-from src.infer import separate, N_FFT, HOP_LENGTH, N_BINS
+from src.infer import separate, load_model, N_FFT, HOP_LENGTH, N_BINS
 
 # —— 特征提取器（与 instrument_recognition/src/btrain.py 保持一致）——
+# 注: torchaudio 是可选依赖，用到 extract_features 时才会导入
 SR = 22050
 DURATION = 3
 SAMPLES_PER_WINDOW = SR * DURATION  # 66150
 _INFERENCE_HOP = int(SR * 0.5)       # 11025
 
-MEL = T.MelSpectrogram(sample_rate=SR, n_mels=128, n_fft=2048, hop_length=512)
-DB = T.AmplitudeToDB(stype="power", top_db=80)
-MFCC = T.MFCC(sample_rate=SR, n_mfcc=13, melkwargs={"n_fft": 2048, "hop_length": 512, "n_mels": 128})
-MODGD_MEL = T.MelScale(n_mels=128, sample_rate=SR, n_stft=2048 // 2 + 1)
-
 
 def _compute_modgd(audio, gamma=0.3):
+    """计算修正群延迟特征（延迟初始化 torchaudio）"""
+    import torchaudio.transforms as T
+
     n_fft, hop_len = 2048, 512
     device = audio.device
     window = torch.hann_window(n_fft, device=device)
@@ -50,15 +46,23 @@ def _compute_modgd(audio, gamma=0.3):
     tau = tau / torch.clamp(S_s ** (2 * gamma), min=1e-6)
     mn, mx = tau.min(dim=1, keepdim=True).values, tau.max(dim=1, keepdim=True).values
     tau = (tau - mn) / (mx - mn + 1e-8)
-    return MODGD_MEL(tau)
+    modgd_mel = T.MelScale(n_mels=128, sample_rate=SR, n_stft=2048 // 2 + 1).to(audio.device)
+    return modgd_mel(tau)
 
 
 def extract_features(window_audio):
-    """提取 3s 窗口的 269 通道特征"""
-    mel = DB(MEL(window_audio))        # [1, 128, T]
-    mfcc = MFCC(window_audio)          # [1, 13, T]
-    modgd = _compute_modgd(window_audio)  # [1, 128, T]
-    return torch.cat([mel, mfcc, modgd], dim=1)  # [1, 269, T]
+    """提取 3s 窗口的 269 通道特征（延迟初始化 torchaudio）"""
+    import torchaudio.transforms as T
+
+    mel = T.MelSpectrogram(sample_rate=SR, n_mels=128, n_fft=2048, hop_length=512).to(window_audio.device)
+    db = T.AmplitudeToDB(stype="power", top_db=80)
+    mfcc = T.MFCC(sample_rate=SR, n_mfcc=13,
+                  melkwargs={"n_fft": 2048, "hop_length": 512, "n_mels": 128}).to(window_audio.device)
+
+    mel_spec = db(mel(window_audio))  # [1, 128, T]
+    mfcc_spec = mfcc(window_audio)    # [1, 13, T]
+    modgd_spec = _compute_modgd(window_audio)  # [1, 128, T]
+    return torch.cat([mel_spec, mfcc_spec, modgd_spec], dim=1)  # [1, 269, T]
 
 
 # —— 吉他检测阈值 ——
@@ -255,18 +259,56 @@ def guitar_pipeline(audio_path, output_path=None, device=None):
 
     sf.write(output_path, output, SR)
     print(f"输出: {output_path}")
-    print(f"吉他占比: {segments[-1][1] - segments[0][0]}/{len(guitar_probs)} 窗口 ≈ {len(output.nonzero()[0])/len(output)*100:.1f}%")
+    guitar_ratio = len(output.nonzero()[0]) / len(output)
+    print(f"吉他占比: {guitar_ratio*100:.1f}%")
 
     return output_path
 
 
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="吉他分离集成流水线")
-    parser.add_argument("audio", help="输入音频路径")
-    parser.add_argument("-o", "--output", default=None)
-    parser.add_argument("--cpu", action="store_true")
-    args = parser.parse_args()
+def batch_process():
+    """扫描 music/ 目录批量分离吉他音轨"""
+    music_dir = os.path.abspath(os.path.join(config.WORKSPACE_DIR, '..', 'music'))
+    output_dir = os.path.join(config.WORKSPACE_DIR, 'output', config.MODEL_VERSION)
+    os.makedirs(output_dir, exist_ok=True)
 
-    device = torch.device("cpu") if args.cpu else config.DEVICE
-    guitar_pipeline(args.audio, args.output, device)
+    device = config.DEVICE
+    print(f"设备: {device}")
+    print(f"输出目录: {output_dir}")
+
+    if not os.path.isdir(music_dir):
+        print(f"music 目录不存在: {music_dir}")
+        return
+
+    supported = ('.wav', '.mp3', '.flac', '.ogg')
+    files = sorted([os.path.join(music_dir, f) for f in os.listdir(music_dir)
+                    if f.lower().endswith(supported)])
+    if not files:
+        print(f"在 {music_dir} 中未找到音频文件")
+        return
+
+    print(f"找到 {len(files)} 个音频文件")
+
+    for f in files:
+        print(f"\n--- 分离: {os.path.basename(f)} ---")
+        out_name = os.path.splitext(os.path.basename(f))[0] + "_guitar.wav"
+        out_path = os.path.join(output_dir, out_name)
+        try:
+            guitar_pipeline(f, out_path, device)
+        except Exception as e:
+            print(f"  错误: {e}")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        audio_path = sys.argv[1]
+        if os.path.exists(audio_path):
+            out_name = os.path.splitext(os.path.basename(audio_path))[0] + "_guitar.wav"
+            out_dir = os.path.join(config.WORKSPACE_DIR, 'output', config.MODEL_VERSION)
+            os.makedirs(out_dir, exist_ok=True)
+            out_path = os.path.join(out_dir, out_name)
+            guitar_pipeline(audio_path, out_path)
+        else:
+            print(f"文件不存在: {audio_path}")
+            sys.exit(1)
+    else:
+        batch_process()

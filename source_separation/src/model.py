@@ -1,51 +1,80 @@
-# model.py — LightweightUMX: 轻量频域掩码音轨分离模型
-# 参照 Open-Unmix 设计，单层 BLSTM + 全连接，~758K 参数
+# model.py — UNet: 频域 2D U-Net 音轨分离模型
+# VER2.0: 复数谱输入 → 2D Conv U-Net → 复数掩码
 import torch
 import torch.nn as nn
 
 
-class LightweightUMX(nn.Module):
-    """轻量频域掩码分离模型，输入混合音频幅度谱，输出目标乐器软掩码"""
-
-    def __init__(self, n_bins=513, hidden=128, num_layers=1):
+class ConvBlock(nn.Module):
+    def __init__(self, cin, cout, stride=(2, 2)):
         super().__init__()
-        self.n_bins = n_bins
+        self.cv = nn.Conv2d(cin, cout, 5, stride=stride, padding=2)
+        self.bn = nn.BatchNorm2d(cout)
+        self.rl = nn.ReLU(inplace=True)
 
-        self.ln = nn.LayerNorm(n_bins)  # 频率轴归一化
+    def forward(self, x):
+        return self.rl(self.bn(self.cv(x)))
 
-        self.lstm = nn.LSTM(
-            input_size=n_bins,
-            hidden_size=hidden,
-            num_layers=num_layers,
-            bidirectional=True,
-            batch_first=False,  # [T, B, F] 输入格式
-        )
 
-        lstm_out = hidden * 2  # bidirectional → 2× hidden
-        self.fc1 = nn.Sequential(
-            nn.Linear(lstm_out, hidden),
-            nn.ReLU(),
-        )
-        self.fc2 = nn.Sequential(
-            nn.Linear(hidden, n_bins),
-            nn.Sigmoid(),
-        )
+class DeconvBlock(nn.Module):
+    def __init__(self, cin, cout):
+        super().__init__()
+        self.dc = nn.ConvTranspose2d(cin, cout, 4, stride=2, padding=1)
+        self.bn = nn.BatchNorm2d(cout)
+        self.rl = nn.ReLU(inplace=True)
 
-    def forward(self, mag):
+    def forward(self, x, target_size):
+        x = self.dc(x)
+        if x.shape[-2:] != target_size:
+            x = nn.functional.interpolate(x, size=target_size, mode='bilinear', align_corners=False)
+        return self.rl(self.bn(x))
+
+
+class UNet(nn.Module):
+    """频域 2D U-Net 复数掩码分离模型
+
+    输入: [B, 2, F, T] 混合音频复数 STFT (real+imag)
+    输出: [B, 2, F, T] 复数掩码 [-1, 1] (real+imag)
+    """
+    def __init__(self, channels=(48, 96, 192)):
+        super().__init__()
+        c1, c2, c3 = channels
+
+        # Encoder
+        self.enc1 = ConvBlock(2, c1, stride=(2, 2))   # [48, 257, 130]
+        self.enc2 = ConvBlock(c1, c2, stride=(2, 2))  # [96, 129, 65]
+        self.enc3 = ConvBlock(c2, c3, stride=(2, 2))  # [192, 65, 33]
+
+        # Bottleneck
+        self.bn1 = nn.Conv2d(c3, c3, 3, padding=1)
+        self.bn2 = nn.Conv2d(c3, c3, 3, padding=1)
+
+        # Decoder
+        self.dec3 = DeconvBlock(c3 * 2, c2)  # concat skip
+        self.dec2 = DeconvBlock(c2 * 2, c1)
+        self.dec1 = nn.ConvTranspose2d(c1 * 2, 2, 4, stride=2, padding=1)
+        # 初始偏置 +2.0 → tanh(2)≈0.96 → 初始掩码非零，加速收敛
+        nn.init.constant_(self.dec1.bias, 2.0)
+
+    def forward(self, x):
         """
-        Args:
-            mag: [B, F, T] 混合音频幅度谱 (F=513)
-        Returns:
-            mask: [B, F, T] 目标乐器软掩码 (0~1)
+        x: [B, 2, F, T] 复数 STFT
+        returns: [B, 2, F, T] 复数掩码
         """
-        # LayerNorm 期望最后一维是特征维 → 转置为 [B, T, F]
-        x = mag.permute(0, 2, 1)  # [B, T, F]
-        x = self.ln(x)
-        # LSTM 期望 [T, B, F]
-        x = x.permute(1, 0, 2)  # [T, B, F]
-        x, _ = self.lstm(x)
-        x = self.fc1(x)  # [T, B, hidden]
-        x = self.fc2(x)  # [T, B, F]
-        # 转回 [B, F, T]
-        x = x.permute(1, 2, 0)  # [B, F, T]
-        return x
+        # Encoder
+        e1 = self.enc1(x)   # [B, 48, ~257, ~130]
+        e2 = self.enc2(e1)  # [B, 96, ~129, ~65]
+        e3 = self.enc3(e2)  # [B, 192, ~65, ~33]
+
+        # Bottleneck
+        b = self.bn1(e3)
+        b = nn.functional.relu_(b)
+        b = self.bn2(b)
+        b = nn.functional.relu_(b)
+
+        # Decoder with skip
+        d3 = self.dec3(torch.cat([b, e3], dim=1), e2.shape[-2:])  # [B, 96, ~129, ~65]
+        d2 = self.dec2(torch.cat([d3, e2], dim=1), e1.shape[-2:])  # [B, 48, ~257, ~130]
+        d1 = self.dec1(torch.cat([d2, e1], dim=1))  # [B, 2, F, T]
+        d1 = nn.functional.interpolate(d1, size=x.shape[-2:], mode='bilinear', align_corners=False)
+
+        return torch.tanh(d1)
