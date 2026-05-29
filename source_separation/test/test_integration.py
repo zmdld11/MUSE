@@ -4,7 +4,7 @@
 #   python test/test_integration.py                       # 扫描 music/ 目录
 #   python test/test_integration.py 路径/音频.wav         # 指定单文件
 #
-# 输出: output/VER1.0_LightweightUMX/{文件名}_guitar.wav
+# 输出: output/{MODEL_VERSION}/{文件名}_guitar.wav
 import os
 import sys
 import numpy as np

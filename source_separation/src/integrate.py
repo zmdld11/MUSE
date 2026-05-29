@@ -17,7 +17,7 @@ _bmodel_spec.loader.exec_module(_bmodel)
 BinaryInstrumentClassifier = _bmodel.BinaryInstrumentClassifier
 
 from src.config import config
-from src.infer import separate, load_model, N_FFT, HOP_LENGTH, N_BINS
+from src.infer import separate, load_model
 
 # —— 特征提取器（与 instrument_recognition/src/btrain.py 保持一致）——
 # 注: torchaudio 是可选依赖，用到 extract_features 时才会导入
