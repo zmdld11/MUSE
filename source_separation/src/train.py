@@ -1,5 +1,5 @@
 # train.py — DemucsLM 时域训练主循环
-# VER5.0: 在线随机混音 + MRSTFT 混合损失 + 4层模型
+# VER6.0: Demucs 格式数据 + 输入归一化 + GroupNorm + 权重 rescale
 import os, argparse, time
 import torch
 import torch.nn.functional as F
@@ -9,8 +9,7 @@ from datetime import datetime
 
 from src.config import config
 from src.model import DemucsLM
-from src.dataset import GuitarSeparationDataset
-from src.remix_dataset import RemixDataset
+from src.demucs_dataset import DemucsGuitarDataset
 
 
 def compute_sdr(est, target, eps=1e-8):
@@ -40,42 +39,27 @@ def train(args):
     device = config.DEVICE
     print(f"设备: {device}")
     print(f"版本: {config.MODEL_VERSION}")
+    print(f"Phase 1: 输入归一化 + GroupNorm + rescale={config.RESCALE} + grad_clip={config.GRAD_CLIP}")
     print(f"损失: L1 + {config.MRSTFT_WEIGHT}×MRSTFT{config.MRSTFT_FFT_SIZES}")
     print(f"模型: {len(config.DEMUCS_CHANNELS)}层, 通道{config.DEMUCS_CHANNELS}")
-    print(f"输入: {config.NUM_SAMPLES} 样本 ({config.NUM_SAMPLES/config.SR:.2f}s)")
+    print(f"输入: {config.SEGMENT}s @ {config.SR}Hz")
 
-    # 构建 RemixDataset 作为增强源 (50% 概率随机混音切断捷径)
-    remix_ds = RemixDataset(
-        medleydb_dir=config.MEDLEYDB_DIR,
-        medleydb_meta_dir=config.MEDLEYDB_META_DIR,
-        moisesdb_dir=config.MOISESDB_DIR,
-        num_samples=config.NUM_SAMPLES,
-        sr=config.SR,
-        num_total=config.REMIX_TOTAL,
-        cache_path=config.STEM_INDEX_CACHE,
-    )
-    # 训练集: 50% 真实预计算数据 + 50% 随机混音
-    train_ds = GuitarSeparationDataset(
-        config.DATASET_DIR, "train", augment=True,
-        remix_dataset=remix_ds, remix_prob=0.5,
-        num_samples=config.NUM_SAMPLES,
-    )
-    # 验证集: 纯真实预计算数据
-    val_ds = GuitarSeparationDataset(
-        config.DATASET_DIR, "val", augment=False,
-        num_samples=config.NUM_SAMPLES,
-    )
-    print(f"训练: {len(train_ds)} (50%真实+50%混音), 验证: {len(val_ds)} (纯真实)")
+    train_dir = os.path.join(config.DEMUCS_FORMAT_DIR, "train")
+    valid_dir = os.path.join(config.DEMUCS_FORMAT_DIR, "valid")
+    train_ds = DemucsGuitarDataset(train_dir, segment=config.SEGMENT, shift=config.SHIFT,
+                                   sr=config.SR, augment=True, remix_prob=0.5)
+    val_ds = DemucsGuitarDataset(valid_dir, segment=config.SEGMENT, shift=config.SHIFT,
+                                  sr=config.SR, augment=False)
+    print(f"训练: {len(train_ds)} segments, 验证: {len(val_ds)} segments")
 
     tl = DataLoader(train_ds, config.BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True)
     vl = DataLoader(val_ds, config.BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True, persistent_workers=True)
 
-    model = DemucsLM(channels=config.DEMUCS_CHANNELS).to(device)
+    model = DemucsLM(channels=config.DEMUCS_CHANNELS, rescale=config.RESCALE).to(device)
     n_p = sum(p.numel() for p in model.parameters())
     print(f"参数量: {n_p:,}")
 
     opt = torch.optim.Adam(model.parameters(), lr=config.LR, weight_decay=config.WEIGHT_DECAY)
-    sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, 'min', factor=config.SCHEDULER_FACTOR, patience=config.SCHEDULER_PATIENCE)
 
     ckpt_path = os.path.join(config.MODEL_DIR, "checkpoint_latest.pth")
     start_epoch = 0
@@ -86,7 +70,6 @@ def train(args):
         ck = torch.load(ckpt_path, map_location=device, weights_only=False)
         model.load_state_dict(ck["model_state_dict"])
         opt.load_state_dict(ck["optimizer_state_dict"])
-        sched.load_state_dict(ck["scheduler_state_dict"])
         start_epoch = ck["epoch"]
         best_sdr = ck.get("best_val_sdr", -float('inf'))
         train_losses = ck.get("train_losses", [])
@@ -98,7 +81,7 @@ def train(args):
         f.write(f"{'='*50}\nModel: {config.MODEL_VERSION}\n")
         f.write(f"Arch: {len(config.DEMUCS_CHANNELS)}层, 通道{config.DEMUCS_CHANNELS}\n")
         f.write(f"Params: {n_p:,}\n")
-        f.write(f"Input: {config.NUM_SAMPLES} samples, Train: {len(train_ds)} (50%real+50%remix), Val: {len(val_ds)}\n")
+        f.write(f"Segment: {config.SEGMENT}s, Train: {len(train_ds)}, Val: {len(val_ds)}\n")
         f.write(f"Loss: L1 + {config.MRSTFT_WEIGHT}×MRSTFT{config.MRSTFT_FFT_SIZES}\n")
         f.write("Epoch\tTrain_Loss\tVal_SDR(dB)\tTime(s)\tLR\n")
 
@@ -120,6 +103,7 @@ def train(args):
             loss = l1_loss + config.MRSTFT_WEIGHT * mrstft_loss
 
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), config.GRAD_CLIP)
             opt.step()
             train_loss += loss.item()
         train_loss /= len(tl)
@@ -133,8 +117,6 @@ def train(args):
                 val_sdr += compute_sdr(pred, gtr.unsqueeze(1)) * mix.size(0)
         val_sdr /= len(val_ds)
         lr = opt.param_groups[0]['lr']
-        sched.step(-val_sdr)
-
         elapsed = time.time() - t0
 
         print(f"  E{epoch+1}: Loss={train_loss:.4f}  SDR={val_sdr:.2f} dB  Time={elapsed:.0f}s  LR={lr:.1e}")
@@ -151,7 +133,7 @@ def train(args):
             print(f"  → 保存 (SDR={val_sdr:.2f})")
 
         torch.save({"epoch": epoch + 1, "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": opt.state_dict(), "scheduler_state_dict": sched.state_dict(),
+                    "optimizer_state_dict": opt.state_dict(),
                     "best_val_sdr": best_sdr, "train_losses": train_losses, "val_sdrs": val_sdrs}, ckpt_path)
 
         if epoch - max(enumerate(val_sdrs), key=lambda x: x[1])[0] >= config.EARLY_STOPPING_PATIENCE:

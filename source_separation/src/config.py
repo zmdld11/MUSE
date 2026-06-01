@@ -5,41 +5,36 @@ import torch
 class Config:
     def __init__(self):
         self.WORKSPACE_DIR = r"D:\program_project\MUSE\source_separation"
-        self.MODEL_VERSION = "VER5.0_RemixAug"
-        self.TARGET_INSTRUMENT = "guitar"  # acoustic + electric 合并
+        self.MODEL_VERSION = "VER6.0_DemucsFormat"
+        self.TARGET_INSTRUMENT = "guitar"
 
         # Audio params
         self.SR = 22050
-        self.NUM_SAMPLES = 65536  # 2.97s, 整除 4^4=256, 解码器完美对齐
+        self.SEGMENT = 6.0   # 片段长度(秒), 可改为 11.0 对齐 Demucs
+        self.SHIFT = 3.0     # 验证集滑动步长(秒), 训练随机裁剪
 
-        # Model params (4 层, 拼接式跳跃连接)
+        # Model params (4 层, 拼接式跳跃连接, GroupNorm)
         self.DEMUCS_CHANNELS = (48, 96, 192, 384)
+        self.RESCALE = 0.1
 
         # MRSTFT loss params
         self.MRSTFT_FFT_SIZES = [2048, 1024, 512]
         self.MRSTFT_WEIGHT = 0.5
 
         # Train params
-        self.BATCH_SIZE = 16
+        self.BATCH_SIZE = 8
         self.EPOCHS = 100
         self.LR = 3e-4
         self.WEIGHT_DECAY = 1e-5
-        self.EARLY_STOPPING_PATIENCE = 10
-        self.SCHEDULER_PATIENCE = 3
-        self.SCHEDULER_FACTOR = 0.5
+        self.GRAD_CLIP = 1.0
+        self.EARLY_STOPPING_PATIENCE = 20
 
         # Data paths
         self.DATASET_DIR = os.path.join(self.WORKSPACE_DIR, "data")
+        self.DEMUCS_FORMAT_DIR = os.path.join(self.DATASET_DIR, "demucs_format")
         self.MODEL_DIR = os.path.join(self.WORKSPACE_DIR, "model")
         self.LOG_DIR = os.path.join(self.MODEL_DIR, "log")
         self.OUTPUT_DIR = os.path.join(self.WORKSPACE_DIR, "output")
-
-        # 原始分轨数据源 (用于在线随机混音)
-        self.MEDLEYDB_DIR = r"D:\program_project\MUSE\data\MedleyDB\MedleyDB"
-        self.MEDLEYDB_META_DIR = r"D:\program_project\MUSE\data\MedleyDB\Metadata"
-        self.MOISESDB_DIR = r"D:\program_project\MUSE\data\moisesdb_v0.1"
-        self.STEM_INDEX_CACHE = os.path.join(self.DATASET_DIR, "stem_index.json")
-        self.REMIX_TOTAL = 25000  # 每 epoch 的随机混音样本数
 
         # Instrument recognition paths (for integration)
         self.INST_MODEL_DIR = r"D:\program_project\MUSE\instrument_recognition\model\binary"

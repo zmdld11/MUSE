@@ -265,3 +265,55 @@ Target = g_gain × Guitar(Song_A)
 - 随机混音切断了"输出混合=降低损失"的捷径
 - 4 层模型保留更精细时间结构，减少过拟合
 - 目标: SDR > 3 dB（首次突破 0.5 dB 墙）
+
+**实际结果 (VER5.0 三版, 全部失败)**:
+| 子版本 | 跳跃连接 | 参数量 | Epochs | 最佳 SDR |
+|--------|---------|--------|--------|----------|
+| add-skip | 相加 | 1.66M | 28 | 0.45 |
+| concat-skip | 拼接 | 7.03M | 36 | 0.43 |
+| concat-skip(再次) | 拼接 | 7.03M | 36 | 0.43 |
+| 所有版本 SDR 上限 | — | — | — | **0.45 dB** |
+
+六次训练（含 VER3.0/4.0），SDR 天花板确认为 0.45 dB。已确认非损失函数或数据问题，而是模型架构存在系统性差距。
+
+---
+
+### 版本: VER6.0_Phase1
+
+**日期**: 2026-05-30
+
+**设计理念**:
+基于 Demucs 源码审查（见 `demucs_code_review.md`），补全我们模型中缺失的关键组件。
+不改模型架构（4层 + 拼接式 DecBlock），只加归一化和训练稳定性组件。
+
+**改动清单**:
+| # | 改动 | 来源 | 效果 |
+|---|------|------|------|
+| 1 | 输入归一化 | Demucs forward() | per-sample zero-mean unit-variance |
+| 2 | GroupNorm | Demucs EncBlock/DecBlock | 每层 Conv 后加 GroupNorm(1, channels) |
+| 3 | 权重 rescale | Demucs rescale_module() | 所有 Conv1d 权重 std→0.1 |
+| 4 | 梯度裁剪 | 通用实践 | clip_grad_norm(max_norm=1.0) |
+| 5 | 移除 Scheduler | 学 Demucs | 恒定 LR=3e-4, 不衰减 |
+| 6 | 增大片段 | — | 65536→131072 (~6s, 整除 4^4) |
+
+**模型结构** (与 VER5.0 相同):
+```
+EncBlock: Conv1d → GroupNorm → GLU
+DecBlock: ConvTranspose1d → concat(skip) → Conv1x1融合 → GroupNorm → GLU
+DemucsLM: 4层, 通道(48,96,192,384), 输入归一化+反归一化
+```
+
+**训练配置**:
+- 损失: L1(波形) + 0.5×MRSTFT([2048,1024,512])
+- 优化器: Adam(lr=3e-4), **恒定 LR（无 Scheduler）**
+- 梯度裁剪: max_norm=1.0
+- Batch=8（因片段加倍，显存翻倍）
+- 片段: 131072 样本 (5.94s @ 22050Hz)
+- 早停 patience: 20（放宽，因无 LR 衰减后需要更多轮）
+- 数据: 50% 预计算真实混音 + 50% 跨歌曲随机混音
+
+**预期**:
+- GroupNorm + 输入归一化 → 训练稳定性大幅提升
+- 权重 rescale → 深层梯度不爆炸
+- 更长片段 → 更多音乐上下文
+- 目标: SDR > 1 dB（突破 0.5 dB 天花板）

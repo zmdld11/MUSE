@@ -8,7 +8,7 @@ import soundfile as sf
 
 class GuitarSeparationDataset(Dataset):
     def __init__(self, data_dir, split="train", augment=False,
-                 remix_dataset=None, remix_prob=0.5, num_samples=65536):
+                 remix_dataset=None, remix_prob=0.5, num_samples=None):
         meta_path = os.path.join(data_dir, "metadata.json")
         with open(meta_path, 'r', encoding='utf-8') as f:
             meta = json.load(f)
@@ -49,17 +49,18 @@ class GuitarSeparationDataset(Dataset):
         mix = torch.from_numpy(mix.astype("float32"))
         gtr = torch.from_numpy(gtr.astype("float32"))
 
-        # 裁剪到模型输入长度 (确定性用于验证, 随机用于训练)
-        if len(mix) >= self.num_samples:
-            if self.augment:
-                start = random.randint(0, len(mix) - self.num_samples)
+        # 裁剪/填充到模型输入长度 (None=保持原长, 用于验证)
+        if self.num_samples is not None:
+            if len(mix) >= self.num_samples:
+                if self.augment:
+                    start = random.randint(0, len(mix) - self.num_samples)
+                else:
+                    start = 0
+                mix = mix[start:start + self.num_samples]
+                gtr = gtr[start:start + self.num_samples]
             else:
-                start = 0
-            mix = mix[start:start + self.num_samples]
-            gtr = gtr[start:start + self.num_samples]
-        else:
-            mix = torch.nn.functional.pad(mix, (0, self.num_samples - len(mix)))
-            gtr = torch.nn.functional.pad(gtr, (0, self.num_samples - len(gtr)))
+                mix = torch.nn.functional.pad(mix, (0, self.num_samples - len(mix)))
+                gtr = torch.nn.functional.pad(gtr, (0, self.num_samples - len(gtr)))
 
         if self.augment:
             gain = 10 ** (random.uniform(-3, 3) / 20)
