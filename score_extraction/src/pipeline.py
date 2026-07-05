@@ -49,11 +49,17 @@ def run_pipeline(audio_path: str, output_dir: str | None = None) -> str:
         all_notes[inst_name] = notes
         logger.info(f"  {inst_name}: {len(notes)} notes")
 
+    # Bass octave shift: move low pitches up one octave for readability
+    if "bass" in all_notes:
+        for n in all_notes["bass"]:
+            if n["pitch"] < 50:
+                n["pitch"] += 12
+
     # 4. Guitar chords (best-effort)
     chords = []
     if "guitar" in tracks:
         logger.info("[4/6] Chord detection (guitar)...")
-        chords = detect_chords(tracks["guitar"], bpm)
+        chords = detect_chords(tracks["guitar"])
 
     # 5. Key estimation
     logger.info("[5/6] Key estimation...")

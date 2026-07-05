@@ -3,7 +3,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def detect_chords(wav_path: str, bpm: float) -> list[dict]:
+def detect_chords(wav_path: str) -> list[dict]:
     try:
         import madmom
         from madmom.features.chords import (

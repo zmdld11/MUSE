@@ -1,5 +1,5 @@
 import logging
-from music21 import stream, meter, key, tempo, dynamics, note, spanner
+from music21 import stream, meter, key, tempo, dynamics, note, spanner, harmony
 
 logger = logging.getLogger(__name__)
 
@@ -59,10 +59,16 @@ def assemble_score(instrument_name, notes, bpm, key_signature,
     s = stream.Score()
     part = stream.Part()
     part.partName = instrument_name
-    part.append(tempo.MetronomeMark(number=int(bpm)))
+    part.append(tempo.MetronomeMark(number=int(bpm), text=_bpm_to_tempo_term(bpm)))
     part.append(meter.TimeSignature(time_signature))
     tonic, mode = _parse_key_signature(key_signature)
     part.append(key.Key(tonic, mode))
+
+    if chords:
+        for ch in chords:
+            offset = ch["start"] * bpm / 60.0
+            cs = harmony.ChordSymbol(ch["label"])
+            part.insert(offset, cs)
 
     notes = _detect_dynamics(notes)
     notes = _detect_slides(notes)
