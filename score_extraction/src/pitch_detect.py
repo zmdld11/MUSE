@@ -58,8 +58,8 @@ def detect_pitch_piano(wav_path: str) -> list[dict]:
                 "onset": float(e[0]),
                 "offset": float(e[1]),
                 "pitch": int(e[2]),
-                "velocity": int(round(float(e[3]))),
-                "confidence": float(e[3]),
+                "confidence": 1.0,
+                "amplitude": float(e[3]),
             })
 
         logger.info(f"basic-pitch: {len(notes)} notes (piano)")
@@ -71,11 +71,6 @@ def detect_pitch_piano(wav_path: str) -> list[dict]:
     except Exception as e:
         logger.warning(f"basic-pitch failed ({e}), piano -> crepe mono")
         return detect_pitch_mono(wav_path)
-
-
-def hz_to_midi(freq_hz: float) -> float:
-    """Convert frequency in Hz to MIDI note number."""
-    return 69.0 + 12.0 * np.log2(freq_hz / 440.0)
 
 
 def _frames_to_notes(
