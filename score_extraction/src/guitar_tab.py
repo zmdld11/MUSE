@@ -58,8 +58,8 @@ def assign_guitar_fingering(notes: list[dict]) -> list[dict]:
     for i in range(n - 1, -1, -1):
         s, f = candidates[i][best_last]
         note_copy = dict(notes[i])
-        note_copy["string"] = int(s) + 1
-        note_copy["fret"] = int(f)
+        note_copy["string"] = 6 - s  # 6-0=6 (低E), 6-5=1 (高E)
+        note_copy["fret"] = f
         result.append(note_copy)
         _, best_last = dp[i][best_last] if i > 0 else (0, -1)
 
