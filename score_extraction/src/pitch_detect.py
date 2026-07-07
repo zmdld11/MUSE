@@ -43,24 +43,46 @@ def detect_pitch_mono(wav_path: str) -> list[dict]:
         return []
 
 
-def detect_pitch_piano(wav_path: str) -> list[dict]:
+def detect_pitch_piano(wav_path: str, onset_threshold=0.3, frame_threshold=0.2, minimum_note_length=100.0) -> list[dict]:
+    """Detect piano notes using basic-pitch.
+
+    Parameters tuneable for better sensitivity:
+        onset_threshold: lower = more notes (default 0.5, we use 0.3)
+        frame_threshold: lower = longer notes (default 0.3, we use 0.2)
+        minimum_note_length: minimum note length in ms (default 127.7)
+    """
     try:
         from basic_pitch.inference import predict
         from basic_pitch import ICASSP_2022_MODEL_PATH
 
-        _, _, note_events = predict(wav_path, model_or_model_path=ICASSP_2022_MODEL_PATH)
+        _, _, note_events = predict(
+            wav_path,
+            model_or_model_path=ICASSP_2022_MODEL_PATH,
+            onset_threshold=onset_threshold,
+            frame_threshold=frame_threshold,
+            minimum_note_length=minimum_note_length,
+        )
 
         notes = []
         for e in note_events:
-            # basic-pitch returns 5-element tuples:
-            # (start_time, end_time, pitch, amplitude, note_on_velocities)
+            amp = float(e[3]) if len(e) > 3 else 0.5
+            # Filter out very quiet notes (likely noise artifacts)
+            if amp < 0.02:
+                continue
+            # Piano with pedal: basic-pitch can't always detect proper offsets.
+            # Cap at 4.0s to prevent extreme ghost notes while preserving real held notes.
+            dur = e[1] - e[0]
+            offset = e[0] + min(dur, 4.0)
             notes.append({
                 "onset": float(e[0]),
-                "offset": float(e[1]),
+                "offset": float(offset),
                 "pitch": int(e[2]),
                 "confidence": 1.0,
-                "amplitude": float(e[3]),
+                "amplitude": amp,
             })
+
+        # basic-pitch returns notes in arbitrary order — sort by onset
+        notes.sort(key=lambda n: n["onset"])
 
         logger.info(f"basic-pitch: {len(notes)} notes (piano)")
         return notes

@@ -29,6 +29,10 @@ def run_pipeline(audio_path: str, output_dir: str | None = None) -> str:
 
     # 1. BPM
     bpm = detect_bpm(audio_path) or config.DEFAULT_BPM
+    # Correct double-time detection: solo piano rarely exceeds 120 BPM
+    if bpm > 120:
+        logger.info(f"  BPM {bpm} seems too high, halving to {bpm/2:.1f}")
+        bpm = round(bpm / 2, 1)
     logger.info(f"[1/6] BPM: {bpm}")
 
     # 2. Source separation
@@ -43,7 +47,8 @@ def run_pipeline(audio_path: str, output_dir: str | None = None) -> str:
             all_notes[inst_name] = []  # skip drums
             continue
         elif inst_name == "piano":
-            notes = detect_pitch_piano(wav_path)
+            # basic-pitch works best on original audio, not demucs-separated stems
+            notes = detect_pitch_piano(audio_path)
         else:
             notes = detect_pitch_mono(wav_path)
         all_notes[inst_name] = notes
@@ -90,7 +95,10 @@ def run_pipeline(audio_path: str, output_dir: str | None = None) -> str:
         )
 
         output_stem = os.path.join(output_dir, inst_name)
-        export_score(score, output_stem)
+        try:
+            export_score(score, output_stem)
+        except Exception as e:
+            logger.error(f"  {inst_name}: export failed ({e}), skipping")
 
     # Write info.json
     info = {

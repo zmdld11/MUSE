@@ -1,0 +1,13 @@
+# MUSE 音轨分离 - 训练依赖
+# AutoDL 安装: bash setup_autodl.sh (会自动处理 torch + 系统库)
+
+# 核心 (训练必须)
+torch>=2.0
+torchaudio>=2.0        # infer/integrate 需要, 训练可选
+soundfile>=0.12        # 依赖系统 libsndfile1, setup 脚本会装
+tqdm>=4.60
+numpy>=1.20
+
+# 可选 (数据预处理, 已跑完则不需要)
+# pyyaml   # build_demucs_format.py MedleyDB YAML 解析
+# librosa  # build_demucs_format.py 重采样

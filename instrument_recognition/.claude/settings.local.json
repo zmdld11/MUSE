@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C \"d:\\\\program_project\\\\MUSE\" log --oneline -20)",
+      "WebSearch"
+    ]
+  }
+}

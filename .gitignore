@@ -56,3 +56,10 @@ model/*.ckpt
 
 # Logs
 *.log
+
+source_separation/demucs-main/
+.superpowers/
+docs/
+music/
+article/
+score_extraction/markdown/
