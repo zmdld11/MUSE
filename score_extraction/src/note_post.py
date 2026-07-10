@@ -24,15 +24,26 @@ HARMONIC_INTERVALS = [
 ]
 
 
+_FLUX_CACHE: dict = {}
+
+def _get_flux(audio: np.ndarray, sr: int, hop_length: int) -> np.ndarray:
+    """Compute spectral flux once, cache by audio identity."""
+    key = id(audio)
+    if key not in _FLUX_CACHE:
+        n_fft = 2048
+        spec = np.abs(librosa.stft(audio, n_fft=n_fft, hop_length=hop_length))
+        flux = np.sum(np.maximum(spec[:, 1:] - spec[:, :-1], 0), axis=0)
+        _FLUX_CACHE[key] = flux
+    return _FLUX_CACHE[key]
+
+
 def _spectral_flux(audio: np.ndarray, sr: int, hop_length: int,
                    center_frame: int, window: int = 5) -> int:
     """
     Compute spectral flux in a window around center_frame.
-    Returns the frame with maximum flux (best onset candidate).
+    Uses a cached global STFT computation to avoid recomputation per note.
     """
-    n_fft = 2048
-    spec = np.abs(librosa.stft(audio, n_fft=n_fft, hop_length=hop_length))
-    flux = np.sum(np.maximum(spec[:, 1:] - spec[:, :-1], 0), axis=0)  # (T_spec - 1,)
+    flux = _get_flux(audio, sr, hop_length)
 
     start = max(0, center_frame - window)
     end = min(len(flux), center_frame + window + 1)

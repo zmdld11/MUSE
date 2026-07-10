@@ -1,4 +1,4 @@
-"""Layer 5 (partial): Music21 Score assembly from clean note lists.
+"""Layer 5: Music21 Score assembly from clean note lists.
 
 All post-processing (HMM, thresholding, harmonic pruning, voice assign)
 is handled upstream. This module ONLY handles:
@@ -6,9 +6,13 @@ is handled upstream. This module ONLY handles:
   - Adding tempo, key, time signature
   - Voice-aware measure division
   - Dynamics (simple: first-note initial, then on-change)
+
+Uses manual measure construction + voice objects to avoid makeMeasures()
+issues with cross-measure note splitting.
 """
 import logging
-from music21 import stream, meter, key, tempo, dynamics, note, harmony
+from collections import defaultdict
+from music21 import stream, meter, key, tempo, dynamics, note, chord, tie
 
 logger = logging.getLogger(__name__)
 
@@ -32,38 +36,115 @@ def _quantize_duration(ql: float) -> float:
     return min(STANDARD_DURATIONS, key=lambda d: abs(d - ql))
 
 
+def _quantize_duration_max(ql: float, max_ql: float) -> float:
+    """Quantize to a standard duration, but never exceed max_ql."""
+    ql = max(ql, 0.125)
+    candidates = [d for d in STANDARD_DURATIONS if d <= max_ql + 0.001]
+    if not candidates:
+        return _quantize_duration(ql)
+    return min(candidates, key=lambda d: abs(d - ql))
+
+
+def _split_note_across_measures(ql_onset: float, ql_dur_quantized: float,
+                                 ql_per_measure: float = 4.0):
+    """Split a note that crosses measure boundaries into tied fragments.
+
+    Returns list of (measure_idx, offset_in_measure, frag_dur, tie_type).
+    tie_type is None (no tie), 'start', 'continue', or 'stop'.
+
+    Each fragment's quantized duration is clamped to the available space
+    in its measure, preventing measure overflow.
+    """
+    if ql_dur_quantized <= 0:
+        return []
+
+    measure_idx = int(ql_onset / ql_per_measure)
+    measure_start = measure_idx * ql_per_measure
+    measure_end = measure_start + ql_per_measure
+    note_end = ql_onset + ql_dur_quantized
+
+    # Fits entirely within one measure
+    if note_end <= measure_end + 0.001:
+        return [(measure_idx, ql_onset - measure_start, ql_dur_quantized, None)]
+
+    # Crosses at least one boundary
+    fragments = []
+    remaining = ql_dur_quantized
+    current_onset = ql_onset
+
+    while remaining > 0.001:
+        m_idx = int(current_onset / ql_per_measure)
+        _m_start = m_idx * ql_per_measure
+        m_end = _m_start + ql_per_measure
+        offset_in_m = current_onset - _m_start
+        available = m_end - current_onset
+
+        frag_dur = min(remaining, available)
+        frag_dur_q = _quantize_duration_max(frag_dur, frag_dur)
+
+        # Determine tie type
+        is_first = (len(fragments) == 0)
+        remaining_after = remaining - frag_dur_q
+
+        if is_first and remaining_after <= 0.001:
+            tie_type = None
+        elif is_first:
+            tie_type = "start"
+        elif remaining_after <= 0.001:
+            tie_type = "stop"
+        else:
+            tie_type = "continue"
+
+        fragments.append((m_idx, offset_in_m, frag_dur_q, tie_type))
+
+        current_onset += frag_dur_q
+        remaining -= frag_dur_q
+
+        if remaining < 0.001:
+            break
+        if frag_dur_q <= 0.001:
+            logger.warning(f"  _split_note stuck: onset={ql_onset:.3f}, "
+                           f"remaining={remaining:.4f}, frag_dur_q={frag_dur_q:.4f}")
+            break
+
+    return fragments
+
+
 def assemble_score(instrument_name: str, notes: list[dict], bpm: float,
                    key_signature: str, time_signature: str = "4/4",
                    chords: list[dict] | None = None) -> stream.Score:
     """
-    Build a music21 Score from clean notes.
+    Build a music21 Score from clean notes using manual measure construction.
 
     Notes are placed at absolute onset times (converted to quarterLength).
-    music21 handles measure division automatically via makeMeasures().
+    Measures are created manually. Uses per-voice streams within each measure
+    to correctly represent polyphonic overlapping notes.
 
     Args:
-        notes: list of {"onset": sec, "offset": sec, "pitch": MIDI, "amplitude": 0-1, "voice": int}
+        notes: list of {"onset": sec, "offset": sec, "pitch": MIDI,
+                         "amplitude": 0-1, "voice": int}
     """
+    sorted_notes = sorted(notes, key=lambda n: n["onset"])
+
     s = stream.Score()
     part = stream.Part()
     part.partName = instrument_name
 
+    if "/" in time_signature:
+        beats_per_measure = int(time_signature.split("/")[0])
+    else:
+        beats_per_measure = 4
+    ql_per_measure = float(beats_per_measure)
+
     # Metadata
-    part.append(tempo.MetronomeMark(number=int(bpm), text=_bpm_to_tempo_term(bpm)))
-    part.append(meter.TimeSignature(time_signature))
+    ts = meter.TimeSignature(time_signature)
     ks_parts = key_signature.strip().split()
     tonic, mode = ks_parts[0], ks_parts[1] if len(ks_parts) > 1 else "major"
-    part.append(key.Key(tonic, mode))
+    ks = key.Key(tonic, mode)
+    mm = tempo.MetronomeMark(number=int(bpm), text=_bpm_to_tempo_term(bpm))
 
-    # Chords (guitar only, from madmom)
-    if chords:
-        for ch in chords:
-            offset_ql = ch["start"] * bpm / 60.0
-            cs = harmony.ChordSymbol(ch["label"])
-            part.insert(offset_ql, cs)
-
-    # Dynamics: percentile-based, mark only on change
-    amps = [n.get("amplitude", 0.1) for n in notes]
+    # Dynamics: percentile-based
+    amps = [n.get("amplitude", 0.1) for n in sorted_notes]
     if len(amps) >= 3:
         sorted_amps = sorted(amps)
         n_amps = len(sorted_amps)
@@ -75,7 +156,6 @@ def assemble_score(instrument_name: str, notes: list[dict], bpm: float,
             "f":  sorted_amps[int(n_amps * 0.90)],
             "ff": float("inf"),
         }
-
         def _amp_to_dyn(amp):
             for label, thresh in thresholds.items():
                 if amp <= thresh:
@@ -85,37 +165,122 @@ def assemble_score(instrument_name: str, notes: list[dict], bpm: float,
         def _amp_to_dyn(amp):
             return "mf"
 
-    # Insert notes at absolute offsets
-    last_dyn = None
-    for n in notes:
+    # Phase 1: Pre-compute all fragments with voice grouping
+    # Key: (measure_idx, voice) -> list of (offset_in_m, dur, tie, pitch, amp, is_first, frag_idx)
+    voice_contents = defaultdict(list)
+
+    for n in sorted_notes:
         ql_onset_raw = n["onset"] * bpm / 60.0
-        # Quantize onset to 1/32-note grid (0.125 ql) so that measure-boundary
-        # splits also produce expressible MusicXML durations.
         ql_onset = round(ql_onset_raw * 8) / 8
 
         dur_sec = n["offset"] - n["onset"]
-        ql_dur = _quantize_duration(dur_sec * bpm / 60.0)
+        ql_dur_raw = dur_sec * bpm / 60.0
+        ql_dur = _quantize_duration(ql_dur_raw)
 
-        n_obj = note.Note(n["pitch"])
-        n_obj.duration.quarterLength = ql_dur
+        fragments = _split_note_across_measures(ql_onset, ql_dur, ql_per_measure)
 
-        # Voice assignment (piano: upper/lower)
-        voice_id = n.get("voice", 1)
-        if voice_id == 2:
-            n_obj.stemDirection = "down"
+        for frag_idx, (mi, off, d, tt) in enumerate(fragments):
+            voice_val = n.get("voice", 1)
+            voice_contents[(mi, voice_val)].append({
+                "offset": off,
+                "dur": d,
+                "tie": tt,
+                "pitch": n["pitch"],
+                "amp": n.get("amplitude", 0.1),
+                "is_first": (frag_idx == 0),
+            })
 
-        # Dynamic marking (only on change)
-        dyn_label = _amp_to_dyn(n.get("amplitude", 0.1))
-        if dyn_label != last_dyn:
-            d = dynamics.Dynamic(dyn_label)
-            part.insert(ql_onset, d)
-            last_dyn = dyn_label
+    # Phase 2: Build measures with voice streams
+    measures_dict = {}
+    last_dyn = {}
 
-        part.insert(ql_onset, n_obj)
+    for (mi, voice_val), items in sorted(voice_contents.items()):
+        if mi not in measures_dict:
+            m = stream.Measure()
+            m.number = mi + 1
+            measures_dict[mi] = m
 
-    # Let music21 auto-divide into measures
-    part.makeMeasures(inPlace=True)
+        m_ref = measures_dict[mi]
+
+        # Sort items by offset for sequential insertion into voice
+        items_sorted = sorted(items, key=lambda it: it["offset"])
+
+        # Create a Voice for this voice within the measure
+        v = stream.Voice()
+        v.id = str(voice_val)
+
+        # Group items at the same offset into chords within this voice
+        i = 0
+        while i < len(items_sorted):
+            same_offset = []
+            current_off = items_sorted[i]["offset"]
+            while i < len(items_sorted) and abs(items_sorted[i]["offset"] - current_off) < 0.001:
+                same_offset.append(items_sorted[i])
+                i += 1
+
+            if len(same_offset) == 1:
+                it = same_offset[0]
+                n_obj = note.Note(it["pitch"])
+                n_obj.duration.quarterLength = it["dur"]
+                if it["tie"] is not None:
+                    n_obj.tie = tie.Tie(it["tie"])
+                if voice_val == 2:
+                    n_obj.stemDirection = "down"
+                v.insert(current_off, n_obj)
+
+                # Dynamic (first fragment of note only)
+                if it["is_first"]:
+                    dyn_label = _amp_to_dyn(it["amp"])
+                    prev = last_dyn.get(voice_val)
+                    if dyn_label != prev:
+                        d_obj = dynamics.Dynamic(dyn_label)
+                        v.insert(current_off, d_obj)
+                        last_dyn[voice_val] = dyn_label
+            else:
+                # Chord: multiple notes at the same offset in the same voice
+                note_list = []
+                for it in same_offset:
+                    n_obj = note.Note(it["pitch"])
+                    n_obj.duration.quarterLength = it["dur"]
+                    if it["tie"] is not None:
+                        n_obj.tie = tie.Tie(it["tie"])
+                    if voice_val == 2:
+                        n_obj.stemDirection = "down"
+                    note_list.append(n_obj)
+
+                c = chord.Chord(note_list)
+                v.insert(current_off, c)
+
+                # Dynamic from first item
+                first_items = [it for it in same_offset if it["is_first"]]
+                if first_items:
+                    dyn_label = _amp_to_dyn(first_items[0]["amp"])
+                    prev = last_dyn.get(voice_val)
+                    if dyn_label != prev:
+                        d_obj = dynamics.Dynamic(dyn_label)
+                        v.insert(current_off, d_obj)
+                        last_dyn[voice_val] = dyn_label
+
+        # Insert voice into measure
+        m_ref.insert(0, v)
+
+    # Ensure at least one measure
+    if not measures_dict:
+        m0 = stream.Measure()
+        m0.number = 1
+        measures_dict[0] = m0
+
+    # Add metadata to first measure
+    m0 = measures_dict[min(measures_dict.keys())]
+    m0.insert(0, mm)
+    m0.insert(0, ks)
+    m0.insert(0, ts)
+
+    # Append measures in order
+    for idx in sorted(measures_dict.keys()):
+        part.append(measures_dict[idx])
 
     s.insert(0, part)
-    logger.info(f"Score assembled: {instrument_name} ({len(notes)} notes)")
+    logger.info(f"Score assembled: {instrument_name} ({len(sorted_notes)} notes, "
+                f"{len(measures_dict)} measures)")
     return s
