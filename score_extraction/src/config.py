@@ -10,6 +10,7 @@ class Config:
         self.PITCH_MODEL_PIANO = "basic-pitch"
         self.PITCH_MODEL_MONO = "crepe"
         self.SR = 44100
+        self.MODEL_SR = 22050    # SR for our trained model (mel spectrogram input)
         self.HOP_LENGTH = 512
         self.DEFAULT_BPM = 120.0
         self.DEFAULT_TIME_SIG = "4/4"

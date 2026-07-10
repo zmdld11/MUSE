@@ -5,6 +5,8 @@
 !.vscode/launch.json
 !.vscode/extensions.json
 MUSE.code-workspace
+.claude/
+.superpowers/
 
 # Python
 __pycache__/
@@ -58,7 +60,6 @@ model/*.ckpt
 *.log
 
 source_separation/demucs-main/
-.superpowers/
 docs/
 music/
 article/

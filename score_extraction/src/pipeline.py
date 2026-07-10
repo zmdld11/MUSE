@@ -1,18 +1,103 @@
-import logging, os, json, tempfile
+"""VER2.0 Pipeline: 5-layer AMT architecture.
+
+Layer 1: Acoustic frontend (librosa load)
+Layer 2: Transcription model (basic-pitch raw onset/frame probs)
+Layer 3: Frame-level post-processing (HMM + threshold + CC)
+Layer 4: Note-level post-processing (onset refine + harmonic prune + merge)
+Layer 5: Notation assembly (voice + score + export)
+"""
+import logging
+import os
+import json
+
+import librosa
+import numpy as np
+
 from src.config import config
 from src.bpm_detect import detect_bpm
 from src.source_separate import separate_tracks
-from src.pitch_detect import detect_pitch_mono, detect_pitch_piano
+from src.transcriber import transcribe
+from src.frame_post import process_frames
+from src.note_post import refine_notes
+from src.voice_assign import assign_voices
 from src.chord_detect import detect_chords
 from src.key_estimate import estimate_key
-from src.guitar_tab import assign_guitar_fingering
 from src.score_assemble import assemble_score
 from src.export_score import export_score
 
 logger = logging.getLogger(__name__)
 
 
+def _process_instrument(audio_path: str, inst_name: str, bpm: float,
+                        chords: list[dict] | None = None) -> bool:
+    """Run Layers 2-5 on one instrument track. Returns True on success."""
+    # Layer 2: Transcription
+    logger.info(f"  [{inst_name}] Layer 2: Transcribing...")
+    result = transcribe(audio_path)
+    if result["frame_probs"].size == 0 or result["frame_probs"].max() < 0.01:
+        logger.warning(f"  [{inst_name}] No signal detected, skipping")
+        return False
+
+    # Layer 3: Frame-level post-processing
+    logger.info(f"  [{inst_name}] Layer 3: Frame post-processing...")
+    model_sr = result.get("sr", config.SR)
+    candidates = process_frames(
+        result["onset_probs"],
+        result["frame_probs"],
+        sr=model_sr,
+    )
+    if len(candidates) == 0:
+        logger.warning(f"  [{inst_name}] No candidates after frame post-processing")
+        return False
+
+    # Load audio for onset refinement (use model's SR for consistency)
+    audio, _sr = librosa.load(audio_path, sr=model_sr, mono=True)
+
+    # Layer 4: Note-level post-processing
+    logger.info(f"  [{inst_name}] Layer 4: Note post-processing...")
+    notes = refine_notes(candidates, audio, model_sr)
+    if len(notes) == 0:
+        logger.warning(f"  [{inst_name}] No notes after refinement")
+        return False
+
+    logger.info(f"  [{inst_name}] {len(notes)} notes after refinement")
+
+    # Layer 5a: Voice assignment
+    notes = assign_voices(notes, inst_name)
+
+    # Layer 5b: Key estimation (from all notes accumulated)
+    key_sig = estimate_key(notes)
+
+    # Layer 5c: Score assembly
+    note_count = len(notes)
+    score = assemble_score(
+        inst_name, notes, bpm, key_sig,
+        config.DEFAULT_TIME_SIG, chords if inst_name == "guitar" else None,
+    )
+
+    # Layer 5d: Export
+    output_stem = os.path.join(
+        config.OUTPUT_DIR,
+        os.path.basename(audio_path).rsplit(".", 1)[0],
+        inst_name,
+    )
+    os.makedirs(os.path.dirname(output_stem), exist_ok=True)
+    try:
+        result_path = export_score(score, output_stem)
+        if result_path is not None:
+            logger.info(f"  [{inst_name}] Exported ({note_count} notes): {result_path}")
+        else:
+            logger.error(f"  [{inst_name}] Export returned None (failed)")
+            return False
+    except Exception as exc:
+        logger.error(f"  [{inst_name}] Export crashed: {exc}", exc_info=True)
+        return False
+
+    return True
+
+
 def run_pipeline(audio_path: str, output_dir: str | None = None) -> str:
+    """Full 5-layer AMT pipeline."""
     song_name = os.path.splitext(os.path.basename(audio_path))[0]
     if output_dir is None:
         output_dir = os.path.join(config.OUTPUT_DIR, song_name)
@@ -20,97 +105,44 @@ def run_pipeline(audio_path: str, output_dir: str | None = None) -> str:
 
     # Setup logging
     log_path = os.path.join(output_dir, "pipeline.log")
-    logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-                        handlers=[logging.FileHandler(log_path, encoding="utf-8"),
-                                  logging.StreamHandler()])
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[
+            logging.FileHandler(log_path, encoding="utf-8"),
+            logging.StreamHandler(),
+        ],
+    )
 
-    logger.info(f"=== Pipeline start: {song_name} ===")
+    logger.info(f"=== Pipeline VER2.0 start: {song_name} ===")
 
-    # 1. BPM
+    # Step 1: BPM
     bpm = detect_bpm(audio_path) or config.DEFAULT_BPM
-    # Correct double-time detection: solo piano rarely exceeds 120 BPM
     if bpm > 120:
-        logger.info(f"  BPM {bpm} seems too high, halving to {bpm/2:.1f}")
+        logger.info(f"  Halving BPM: {bpm} → {bpm / 2:.1f}")
         bpm = round(bpm / 2, 1)
-    logger.info(f"[1/6] BPM: {bpm}")
+    logger.info(f"[1/5] BPM: {bpm}")
 
-    # 2. Source separation
-    logger.info("[2/6] Source separation (htdemucs_6s)...")
+    # Step 2: Source separation (Layer 1)
+    logger.info("[2/5] Source separation (htdemucs_6s)...")
     tracks = separate_tracks(audio_path, output_dir)
 
-    # 3. Pitch detection per track
-    logger.info("[3/6] Pitch detection...")
+    # Step 3-5: Process each track
     all_notes = {}
     for inst_name, wav_path in tracks.items():
         if inst_name == "drums":
-            all_notes[inst_name] = []  # skip drums
-            continue
-        elif inst_name == "piano":
-            # basic-pitch works best on original audio, not demucs-separated stems
-            notes = detect_pitch_piano(audio_path)
-        else:
-            notes = detect_pitch_mono(wav_path)
-        all_notes[inst_name] = notes
-        logger.info(f"  {inst_name}: {len(notes)} notes")
-
-    # Bass octave shift: move low pitches up one octave for readability
-    if "bass" in all_notes:
-        for n in all_notes["bass"]:
-            if n["pitch"] < 50:
-                n["pitch"] += 12
-
-    # 4. Guitar chords (best-effort)
-    chords = []
-    if "guitar" in tracks:
-        logger.info("[4/6] Chord detection (guitar)...")
-        chords = detect_chords(tracks["guitar"])
-
-    # 5. Key estimation
-    logger.info("[5/6] Key estimation...")
-    combined_notes = []
-    for notes in all_notes.values():
-        combined_notes.extend(notes)
-    key_sig = estimate_key(combined_notes)
-    logger.info(f"  Key: {key_sig}")
-
-    # 6. Score assembly + export
-    logger.info("[6/6] Score assembly + export...")
-    for inst_name, notes in all_notes.items():
-        if inst_name == "drums":
-            continue  # drum score requires different logic; skip for VER1.0
-        if len(notes) == 0:
-            logger.warning(f"  {inst_name}: no notes, skipping score")
+            all_notes[inst_name] = []
             continue
 
-        is_guitar = (inst_name == "guitar")
-        if is_guitar:
-            notes = assign_guitar_fingering(notes)
-            logger.info(f"  {inst_name}: guitar fingering assigned")
-
-        score = assemble_score(
-            inst_name, notes, bpm, key_sig,
-            config.DEFAULT_TIME_SIG, chords if is_guitar else None,
-            is_guitar,
-        )
-
-        output_stem = os.path.join(output_dir, inst_name)
+        # Piano: use original audio for transcription (basic-pitch works better)
+        src_audio = audio_path if inst_name == "piano" else wav_path
         try:
-            export_score(score, output_stem)
-        except Exception as e:
-            logger.error(f"  {inst_name}: export failed ({e}), skipping")
+            _process_instrument(src_audio, inst_name, bpm)
+        except Exception as exc:
+            logger.error(f"  [{inst_name}] Pipeline crashed: {exc}", exc_info=True)
 
     # Write info.json
-    info = {
-        "song": song_name,
-        "bpm": bpm,
-        "key": key_sig,
-        "time_signature": config.DEFAULT_TIME_SIG,
-        "tracks": {
-            name: len(notes) for name, notes in all_notes.items()
-        },
-        "chord_count": len(chords),
-    }
+    info = {"song": song_name, "bpm": bpm, "time_signature": config.DEFAULT_TIME_SIG}
     with open(os.path.join(output_dir, "info.json"), "w") as f:
         json.dump(info, f, indent=2, ensure_ascii=False)
 
