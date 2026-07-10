@@ -152,6 +152,30 @@ def _label_connected_components(binary: np.ndarray) -> list[dict]:
     return candidates
 
 
+def _max_polyphony_filter(candidates: list[dict], max_per_frame: int = 8) -> list[dict]:
+    """同一帧最多保留 max_per_frame 个最强的候选音符.
+
+    Groups candidates by onset_frame, sorts by confidence descending,
+    and keeps only the top-N per frame.
+    """
+    from collections import defaultdict
+
+    # Group by onset_frame
+    by_frame = defaultdict(list)
+    for c in candidates:
+        by_frame[c["onset_frame"]].append(c)
+
+    kept = []
+    for frame_idx, group in sorted(by_frame.items()):
+        # Sort by confidence descending
+        group.sort(key=lambda x: x["confidence"], reverse=True)
+        kept.extend(group[:max_per_frame])
+
+    logger.info(f"  Max polyphony filter ({max_per_frame}/frame): "
+                f"{len(candidates)} → {len(kept)} candidates")
+    return kept
+
+
 def _filter_by_length(candidates: list[dict], hop_length: int, sr: int) -> list[dict]:
     """Drop notes that are too short or too long."""
     frame_duration = hop_length / sr  # seconds per frame
@@ -171,16 +195,20 @@ def _filter_by_length(candidates: list[dict], hop_length: int, sr: int) -> list[
 
 def _verify_onsets(candidates: list[dict], onset_probs: np.ndarray,
                    window: int = 2, min_onset_prob: float = 0.4) -> list[dict]:
-    """Reject candidates whose onset probability at onset frame is too low."""
+    """Reject candidates whose onset probability at onset frame is too low.
+    High-register notes (MIDI > 72) get a relaxed threshold since their
+    amplitude is naturally lower — easier to be mistaken for noise."""
     verified = []
     for c in candidates:
         onset_f = c["onset_frame"]
         p_bin = c["pitch_bin"]
+        # Relax threshold for high notes (pitch_bin > 50 = MIDI > 71)
+        threshold = min_onset_prob * 0.7 if p_bin > 50 else min_onset_prob
         if onset_f < onset_probs.shape[0] and p_bin < onset_probs.shape[1]:
             win_start = max(0, onset_f - window)
             win_end = min(onset_probs.shape[0], onset_f + window + 1)
             onset_support = onset_probs[win_start:win_end, p_bin].max()
-            if onset_support >= min_onset_prob:
+            if onset_support >= threshold:
                 verified.append(c)
             else:
                 logger.debug(f"  dropped: pitch={c['pitch']}, onset_prob={onset_support:.3f}")
@@ -217,6 +245,9 @@ def process_frames(onset_probs: np.ndarray, frame_probs: np.ndarray,
     # Step 4: Connected components
     candidates = _label_connected_components(binary)
     logger.info(f"  Connected components: {len(candidates)} candidates")
+
+    # Step 4b: Max polyphony filter (同一帧最多 max_per_frame 个音符)
+    candidates = _max_polyphony_filter(candidates, max_per_frame=8)
 
     # Step 5: Length filter
     candidates = _filter_by_length(candidates, hop_length, sr)

@@ -20,6 +20,7 @@ class Config:
         self.OPEN_STRING_BIAS = -0.5
         self.SLIDE_PITCH_THRESHOLD = 0.5
         self.SLIDE_MAX_INTERVAL = 5
+        self.MUSESCORE_PATH = r"C:\Program Files\MuseScore 4\bin\MuseScore4.exe"
         os.makedirs(self.OUTPUT_DIR, exist_ok=True)
         os.makedirs(self.MODEL_DIR, exist_ok=True)
 
