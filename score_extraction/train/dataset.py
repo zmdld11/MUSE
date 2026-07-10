@@ -1,6 +1,11 @@
-"""PyTorch Dataset for synthetic piano training data from MIDI files."""
-import logging
+"""PyTorch Dataset for synthetic piano training data from MIDI files.
+
+Caches rendered mel-spectrograms + labels to disk so multi-epoch training
+does not re-render MIDI files on every epoch.
+"""
 import glob
+import hashlib
+import logging
 import os
 
 import librosa
@@ -13,17 +18,31 @@ from train.render_midi import render_midi
 
 logger = logging.getLogger(__name__)
 
+# Cache directory (under score_extraction/data)
+CACHE_DIR = os.path.join(cfg.WORKSPACE_DIR, "data", "cache")
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+
+def _cache_path(midi_path: str, max_dur_sec: float) -> str:
+    """Deterministic cache key from MIDI path + duration."""
+    raw = f"{midi_path}|{max_dur_sec}".encode("utf-8")
+    h = hashlib.sha256(raw).hexdigest()[:16]
+    return os.path.join(CACHE_DIR, f"{h}.npz")
+
 
 class PianoSynthDataset(Dataset):
     """
-    Dataset that renders MIDI → audio + labels on-the-fly.
+    Dataset that renders MIDI -> audio -> mel-spectrogram + labels.
 
-    Each item: (mel_spec_tensor, onset_labels_tensor, frame_labels_tensor)
+    Rendered results are cached to ``data/cache/`` so they are only computed
+    once across multiple epochs.
     """
 
-    def __init__(self, midi_dir=None, max_files=None, max_dur_sec=None):
+    def __init__(self, midi_dir=None, max_files=None, max_dur_sec=None,
+                 force_recache=False):
         midi_dir = midi_dir or cfg.MIDI_DIR
         self.max_dur_sec = max_dur_sec or cfg.MAX_DUR_SEC
+        self.force_recache = force_recache
 
         # Collect MIDI files (recursive)
         self.midi_paths = sorted(
@@ -32,9 +51,11 @@ class PianoSynthDataset(Dataset):
         if max_files:
             import random
             random.seed(42)
-            self.midi_paths = random.sample(self.midi_paths, min(max_files, len(self.midi_paths)))
+            self.midi_paths = random.sample(
+                self.midi_paths, min(max_files, len(self.midi_paths))
+            )
 
-        logger.info(f"PianoSynthDataset: {len(self.midi_paths)} MIDI files")
+        logger.info("PianoSynthDataset: %d MIDI files", len(self.midi_paths))
 
         # Pre-compute valid files (quick parse to filter broken ones)
         self.valid_paths = []
@@ -47,40 +68,62 @@ class PianoSynthDataset(Dataset):
                     self.valid_paths.append(p)
             except Exception:
                 pass
-        logger.info(f"  Valid (>5s): {len(self.valid_paths)}")
+        logger.info("  Valid (>5s): %d", len(self.valid_paths))
 
     def __len__(self):
         return len(self.valid_paths)
 
     def __getitem__(self, idx):
         path = self.valid_paths[idx]
+        cpath = _cache_path(path, self.max_dur_sec)
+
+        # Try loading from cache
+        if not self.force_recache and os.path.isfile(cpath):
+            try:
+                npz = np.load(cpath, allow_pickle=False)
+                mel_db = npz["mel"]
+                onset = npz["onset"]
+                frame = npz["frame"]
+                return (
+                    torch.from_numpy(mel_db).float().unsqueeze(0),
+                    torch.from_numpy(onset).float(),
+                    torch.from_numpy(frame).float(),
+                )
+            except Exception as exc:
+                logger.debug("Cache read failed for %s: %s", path, exc)
+
+        # Render MIDI -> audio + labels
         try:
             data = render_midi(path, max_dur_sec=self.max_dur_sec)
         except Exception as e:
-            logger.warning(f"Render failed for {path}: {e}, using next file")
+            logger.warning("Render failed for %s: %s, using next file", path, e)
             return self.__getitem__((idx + 1) % len(self))
 
         audio = data["audio"]
         onset = data["onset_labels"]
         frame = data["frame_labels"]
 
-        # Compute Mel spectrogram
+        # Compute Mel spectrogram at the dataset's target hop
         mel = librosa.feature.melspectrogram(
             y=audio, sr=cfg.SR, n_mels=cfg.N_MELS,
             hop_length=cfg.HOP_LENGTH, fmin=30, fmax=8000,
         )
         mel_db = librosa.power_to_db(mel, ref=np.max)  # (n_mels, T_mel)
 
-        # Align spectrogram frames with label frames
-        # Labels use HOP_LENGTH frames, mel uses the same hop_length
+        # Align frames
         min_frames = min(mel_db.shape[1], onset.shape[0], frame.shape[0])
-
         mel_db = mel_db[:, :min_frames]
         onset = onset[:min_frames, :]
         frame = frame[:min_frames, :]
 
         # Normalize mel to [-1, 1]
-        mel_db = np.clip((mel_db + 80) / 80, -1, 1)  # rough normalization
+        mel_db = np.clip((mel_db + 80) / 80, -1, 1)
+
+        # Save to cache
+        try:
+            np.savez_compressed(cpath, mel=mel_db, onset=onset, frame=frame)
+        except Exception as exc:
+            logger.debug("Cache write failed for %s: %s", path, exc)
 
         return (
             torch.from_numpy(mel_db).float().unsqueeze(0),  # (1, n_mels, T)

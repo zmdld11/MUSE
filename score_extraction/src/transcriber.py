@@ -61,7 +61,7 @@ def _ours_inference(model, audio_path: str) -> dict:
     onset = pred["onset"].squeeze(0).cpu().numpy()
     frame = pred["frame"].squeeze(0).cpu().numpy()
     logger.info(f"Our model: onset={onset.shape}, frame={frame.shape}")
-    return {"onset_probs": onset, "frame_probs": frame, "contour": np.zeros((onset.shape[0], 264), dtype=np.float32), "sr": 22050}
+    return {"onset_probs": onset, "frame_probs": frame, "contour": np.zeros((onset.shape[0], 264), dtype=np.float32), "sr": 22050, "hop_length": 512}
 
 
 def _basic_pitch_inference(audio_path: str) -> dict:
@@ -75,7 +75,8 @@ def _basic_pitch_inference(audio_path: str) -> dict:
         frame = mo["note"].numpy() if hasattr(mo["note"], "numpy") else np.array(mo["note"])
         contour = mo["contour"].numpy() if hasattr(mo["contour"], "numpy") else np.array(mo["contour"])
         logger.info(f"basic-pitch fallback: onset={onset.shape}")
-        return {"onset_probs": onset, "frame_probs": frame, "contour": contour, "sr": 22050}
+        # basic-pitch uses hop_length=256 at 22050Hz internally
+        return {"onset_probs": onset, "frame_probs": frame, "contour": contour, "sr": 22050, "hop_length": 256}
     except Exception as e:
         logger.error(f"basic-pitch failed: {e}")
         return {"onset_probs": np.zeros((1,88),np.float32), "frame_probs": np.zeros((1,88),np.float32), "contour": np.zeros((1,264),np.float32), "sr": 22050}

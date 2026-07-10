@@ -24,7 +24,7 @@ class TrainConfig:
 
         # Training
         self.BATCH_SIZE = 8
-        self.EPOCHS_BOOTSTRAP = 20
+        self.EPOCHS_BOOTSTRAP = 30
         self.EPOCHS_EM = 5
         self.LR = 3e-4
         self.MAX_DUR_SEC = 60     # truncate long pieces
@@ -35,6 +35,9 @@ class TrainConfig:
         self.DTW_RADIUS = 50      # Sakoe-Chiba band for fast DTW
 
         self.DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # FluidSynth rendering (auto-detected after config init)
+        self.FLUIDSYNTH_ENABLED = False
 
         os.makedirs(self.MODEL_SAVE_DIR, exist_ok=True)
 

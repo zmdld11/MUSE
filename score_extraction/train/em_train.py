@@ -109,9 +109,9 @@ def run_noteem_training():
     n_params = sum(p.numel() for p in model.parameters())
     logger.info(f"NoteEM on {device}. Model: {n_params:,} params")
 
-    train_bootstrap(model, device, n_files=500)
+    train_bootstrap(model, device, n_files=2000)
 
-    torch.save(model.state_dict(), os.path.join(cfg.MODEL_SAVE_DIR, f"{cfg.MODEL_VERSION}.pth"))
+    torch.save(model.state_dict(), os.path.join(cfg.MODEL_SAVE_DIR, "VER2.0_Bootstrap.pth"))
     logger.info("Done. Model saved.")
 
 

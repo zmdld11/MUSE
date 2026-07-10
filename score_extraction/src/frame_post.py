@@ -22,7 +22,7 @@ MID_REGISTER = (50, 72)     # D4 – C6
 HIGH_REGISTER = (72, 108)   # C6 – C9
 
 
-def _hmm_smooth(probs: np.ndarray, p_stay_on: float = 0.95, p_turn_on: float = 0.05) -> np.ndarray:
+def _hmm_smooth(probs: np.ndarray, p_stay_on: float = 0.88, p_turn_on: float = 0.15) -> np.ndarray:
     """
     Forward-backward HMM smoothing per pitch channel.
 
@@ -89,7 +89,7 @@ def _hmm_smooth(probs: np.ndarray, p_stay_on: float = 0.95, p_turn_on: float = 0
 
 
 def _adaptive_threshold_per_register(frame_probs: np.ndarray,
-                                     percentile: float = 30.0) -> np.ndarray:
+                                     percentile: float = 50.0) -> np.ndarray:
     """
     Binarize frame_probs with register-specific thresholds.
     Each register (low / mid / high) gets its own percentile threshold.
@@ -155,7 +155,7 @@ def _label_connected_components(binary: np.ndarray) -> list[dict]:
 def _filter_by_length(candidates: list[dict], hop_length: int, sr: int) -> list[dict]:
     """Drop notes that are too short or too long."""
     frame_duration = hop_length / sr  # seconds per frame
-    min_frames = 3    # ~35 ms
+    min_frames = 4    # ~46 ms
     max_frames = 600  # ~7 seconds
 
     filtered = []
@@ -170,7 +170,7 @@ def _filter_by_length(candidates: list[dict], hop_length: int, sr: int) -> list[
 
 
 def _verify_onsets(candidates: list[dict], onset_probs: np.ndarray,
-                   window: int = 3, min_onset_prob: float = 0.1) -> list[dict]:
+                   window: int = 2, min_onset_prob: float = 0.4) -> list[dict]:
     """Reject candidates whose onset probability at onset frame is too low."""
     verified = []
     for c in candidates:

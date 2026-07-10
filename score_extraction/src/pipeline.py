@@ -41,9 +41,11 @@ def _process_instrument(audio_path: str, inst_name: str, bpm: float,
     # Layer 3: Frame-level post-processing
     logger.info(f"  [{inst_name}] Layer 3: Frame post-processing...")
     model_sr = result.get("sr", config.SR)
+    model_hop = result.get("hop_length", config.HOP_LENGTH)
     candidates = process_frames(
         result["onset_probs"],
         result["frame_probs"],
+        hop_length=model_hop,
         sr=model_sr,
     )
     if len(candidates) == 0:
@@ -55,7 +57,7 @@ def _process_instrument(audio_path: str, inst_name: str, bpm: float,
 
     # Layer 4: Note-level post-processing
     logger.info(f"  [{inst_name}] Layer 4: Note post-processing...")
-    notes = refine_notes(candidates, audio, model_sr)
+    notes = refine_notes(candidates, audio, model_sr, model_hop)
     if len(notes) == 0:
         logger.warning(f"  [{inst_name}] No notes after refinement")
         return False
