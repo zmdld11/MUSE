@@ -189,7 +189,55 @@ def refine_notes(candidates: list[dict], audio: np.ndarray = None,
                 segment = audio[start_samp:min(end_samp, len(audio))]
                 n["amplitude"] = float(np.sqrt(np.mean(segment ** 2))) if len(segment) > 0 else 0.1
 
-    # Sort by onset
+    # Step 5.5: Chord grouping — snap chord notes to the same onset
+    # Notes within 40ms of each other are treated as a chord; all snap to earliest onset
+    CHORD_WINDOW = 0.04  # 40ms
     notes.sort(key=lambda n: n["onset"])
+    grouped = []
+    i = 0
+    while i < len(notes):
+        chord_start = notes[i]["onset"]
+        chord_notes = [notes[i]]
+        j = i + 1
+        while j < len(notes) and notes[j]["onset"] - chord_start < CHORD_WINDOW:
+            chord_notes.append(notes[j])
+            j += 1
+        # Snap all chord members to the earliest onset
+        for cn in chord_notes:
+            cn["onset"] = chord_start
+        grouped.extend(chord_notes)
+        i = j
+    notes = grouped
+
+    # Sort by onset (again after grouping)
+    notes.sort(key=lambda n: n["onset"])
+
+    # Step 6: Key-based filtering — keep only C major scale notes,
+    # except those that have nearby neighbor support (within 3 semitones, 0.5s)
+    c_major = {0, 2, 4, 5, 7, 9, 11}  # pitch classes (C D E F G A B)
+    filtered = []
+    for n in notes:
+        pc = n["pitch"] % 12
+        if pc in c_major:
+            filtered.append(n)
+            continue
+        # Check if there's a neighbor note within 3 semitones and 0.5s
+        has_neighbor = False
+        for other in notes:
+            if other is n:
+                continue
+            if abs(other["pitch"] - n["pitch"]) <= 3:
+                overlap_front = max(n["onset"], other["onset"])
+                overlap_back = min(n["offset"], other["offset"])
+                if overlap_back - overlap_front > 0.5:
+                    has_neighbor = True
+                    break
+        if has_neighbor:
+            filtered.append(n)
+
+    removed_count = len(notes) - len(filtered)
+    if removed_count > 0:
+        logger.info(f"  Key-based filter: removed {removed_count} non-C-major notes without neighbor support")
+    notes = filtered
 
     return notes

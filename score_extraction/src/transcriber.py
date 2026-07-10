@@ -69,7 +69,7 @@ def _basic_pitch_inference(audio_path: str) -> dict:
         from basic_pitch.inference import predict
         from basic_pitch import ICASSP_2022_MODEL_PATH
         mo, _, _ = predict(audio_path, model_or_model_path=ICASSP_2022_MODEL_PATH,
-                           onset_threshold=0.3, frame_threshold=0.2)
+                           onset_threshold=0.4, frame_threshold=0.2)
         # Handle both tensor (.numpy()) and numpy return types
         onset = mo["onset"].numpy() if hasattr(mo["onset"], "numpy") else np.array(mo["onset"])
         frame = mo["note"].numpy() if hasattr(mo["note"], "numpy") else np.array(mo["note"])

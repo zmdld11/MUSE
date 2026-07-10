@@ -9,9 +9,11 @@ Layer 5: Notation assembly (voice + score + export)
 import logging
 import os
 import json
+import subprocess
 
 import librosa
 import numpy as np
+import pretty_midi
 
 from src.config import config
 from src.bpm_detect import detect_bpm
@@ -26,6 +28,49 @@ from src.score_assemble import assemble_score
 from src.export_score import export_score
 
 logger = logging.getLogger(__name__)
+
+# MIDI program map for common instruments
+_INST_PROGRAMS = {
+    "piano": 0,
+    "guitar": 24,
+    "bass": 33,
+    "violin": 40,
+    "cello": 42,
+    "strings": 48,
+    "vocal": 52,
+}
+
+
+def _write_pretty_midi(notes: list[dict], midi_path: str, bpm: float,
+                       inst_name: str = "piano") -> None:
+    """Write note list to a MIDI file via pretty_midi.
+
+    Each note dict must have: onset, offset (seconds), pitch (MIDI).
+    Optional: amplitude (RMS, mapped to velocity), voice (int).
+    """
+    pm = pretty_midi.PrettyMIDI(initial_tempo=bpm)
+
+    # Group notes by voice, or put everything in one instrument
+    voices = set(n.get("voice", 1) for n in notes)
+    program = _INST_PROGRAMS.get(inst_name, 0)
+
+    for voice_id in sorted(voices) if voices else [1]:
+        inst = pretty_midi.Instrument(program=program)
+        voice_notes = [n for n in notes if n.get("voice", 1) == voice_id]
+        for n in voice_notes:
+            amp = n.get("amplitude", 0.1)
+            # Map RMS amplitude to MIDI velocity (20-100 range)
+            velocity = max(20, min(100, int(amp * 80 + 40)))
+            note = pretty_midi.Note(
+                velocity=velocity,
+                pitch=int(n["pitch"]),
+                start=float(n["onset"]),
+                end=float(n["offset"]),
+            )
+            inst.notes.append(note)
+        pm.instruments.append(inst)
+
+    pm.write(midi_path)
 
 
 def _process_instrument(audio_path: str, inst_name: str, bpm: float,
@@ -77,24 +122,55 @@ def _process_instrument(audio_path: str, inst_name: str, bpm: float,
         config.DEFAULT_TIME_SIG, chords if inst_name == "guitar" else None,
     )
 
-    # Layer 5d: Export
+    # Layer 5d: Export — MIDI → MuseScore CLI (primary), export_score fallback
     output_stem = os.path.join(
         config.OUTPUT_DIR,
         os.path.basename(audio_path).rsplit(".", 1)[0],
         inst_name,
     )
     os.makedirs(os.path.dirname(output_stem), exist_ok=True)
-    try:
-        result_path = export_score(score, output_stem)
-        if result_path is not None:
-            logger.info(f"  [{inst_name}] Exported ({note_count} notes): {result_path}")
-        else:
-            logger.error(f"  [{inst_name}] Export returned None (failed)")
-            return False
-    except Exception as exc:
-        logger.error(f"  [{inst_name}] Export crashed: {exc}", exc_info=True)
-        return False
 
+    midi_path = output_stem + ".mid"
+    xml_path = output_stem + ".musicxml"
+    success = False
+
+    # Method A: pretty_midi → .mid → MuseScore CLI → .musicxml
+    try:
+        _write_pretty_midi(notes, midi_path, bpm, inst_name)
+        logger.info(f"  [{inst_name}] MIDI written: {midi_path}")
+
+        musescore = config.MUSESCORE_PATH
+        if os.path.exists(musescore):
+            result = subprocess.run(
+                [musescore, "-o", xml_path, midi_path],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode == 0 and os.path.exists(xml_path):
+                logger.info(f"  [{inst_name}] MuseScore MusicXML exported ({note_count} notes): {xml_path}")
+                success = True
+            else:
+                logger.warning(f"  [{inst_name}] MuseScore CLI failed (rc={result.returncode}): "
+                               f"{result.stderr[:200]}")
+        else:
+            logger.warning(f"  [{inst_name}] MuseScore not found at {musescore}")
+    except Exception as exc:
+        logger.warning(f"  [{inst_name}] MIDI→MuseScore export failed: {exc}")
+
+    # Method B: fallback to music21 export_score
+    if not success:
+        try:
+            result_path = export_score(score, output_stem)
+            if result_path is not None:
+                logger.info(f"  [{inst_name}] Exported via music21 fallback ({note_count} notes): {result_path}")
+                success = True
+            else:
+                logger.error(f"  [{inst_name}] music21 export returned None")
+        except Exception as exc:
+            logger.error(f"  [{inst_name}] music21 export crashed: {exc}", exc_info=True)
+
+    if not success:
+        logger.error(f"  [{inst_name}] All export methods failed")
+        return False
     return True
 
 
