@@ -21,6 +21,7 @@ from src.source_separate import separate_tracks
 from src.transcriber import transcribe
 from src.frame_post import process_frames
 from src.note_post import refine_notes
+from src.quantize_timing import quantize_onsets
 from src.voice_assign import assign_voices
 from src.chord_detect import detect_chords
 from src.key_estimate import estimate_key
@@ -42,13 +43,20 @@ _INST_PROGRAMS = {
 
 
 def _write_pretty_midi(notes: list[dict], midi_path: str, bpm: float,
-                       inst_name: str = "piano") -> None:
+                       inst_name: str = "piano",
+                       time_sig: str = "4/4") -> None:
     """Write note list to a MIDI file via pretty_midi.
 
     Each note dict must have: onset, offset (seconds), pitch (MIDI).
     Optional: amplitude (RMS, mapped to velocity), voice (int).
     """
     pm = pretty_midi.PrettyMIDI(initial_tempo=bpm)
+
+    # Explicit time signature (MuseScore needs this)
+    ts_parts = time_sig.split("/")
+    pm.time_signature_changes.append(pretty_midi.TimeSignature(
+        numerator=int(ts_parts[0]), denominator=int(ts_parts[1]), time=0.0,
+    ))
 
     # Group notes by voice, or put everything in one instrument
     voices = set(n.get("voice", 1) for n in notes)
@@ -59,7 +67,6 @@ def _write_pretty_midi(notes: list[dict], midi_path: str, bpm: float,
         voice_notes = [n for n in notes if n.get("voice", 1) == voice_id]
         for n in voice_notes:
             amp = n.get("amplitude", 0.1)
-            # Map RMS amplitude to MIDI velocity (20-100 range)
             velocity = max(20, min(100, int(amp * 80 + 40)))
             note = pretty_midi.Note(
                 velocity=velocity,
@@ -109,6 +116,10 @@ def _process_instrument(audio_path: str, inst_name: str, bpm: float,
 
     logger.info(f"  [{inst_name}] {len(notes)} notes after refinement")
 
+    # Layer 4b: Timing quantization (disabled — basic-pitch onset errors > grid/2)
+    # logger.info(f"  [{inst_name}] Layer 4b: Timing quantization...")
+    # notes = quantize_onsets(notes, bpm, config.DEFAULT_TIME_SIG)
+
     # Layer 5a: Voice assignment
     notes = assign_voices(notes, inst_name)
 
@@ -134,37 +145,42 @@ def _process_instrument(audio_path: str, inst_name: str, bpm: float,
     xml_path = output_stem + ".musicxml"
     success = False
 
-    # Method A: pretty_midi → .mid → MuseScore CLI → .musicxml
+    # Export: pretty_midi → .mid → MuseScore CLI → fix BPM → .musicxml
     try:
-        _write_pretty_midi(notes, midi_path, bpm, inst_name)
+        import re as _re
+        _write_pretty_midi(notes, midi_path, bpm, inst_name, config.DEFAULT_TIME_SIG)
         logger.info(f"  [{inst_name}] MIDI written: {midi_path}")
 
         musescore = config.MUSESCORE_PATH
         if os.path.exists(musescore):
             result = subprocess.run(
-                [musescore, "-o", xml_path, midi_path],
+                [musescore, "-f", "-o", xml_path, midi_path],
                 capture_output=True, text=True, timeout=120,
             )
             if result.returncode == 0 and os.path.exists(xml_path):
-                logger.info(f"  [{inst_name}] MuseScore MusicXML exported ({note_count} notes): {xml_path}")
+                # Fix BPM: MuseScore CLI uses default 117, patch to actual bpm
+                with open(xml_path, "r", encoding="utf-8") as _f:
+                    _xml = _f.read()
+                _xml = _re.sub(r'(<sound[^"]*tempo=")117("[^>]*>)', rf'\g<1>{bpm}\g<2>', _xml)
+                _xml = _re.sub(r'<per-minute>117</per-minute>', f'<per-minute>{int(bpm)}</per-minute>', _xml)
+                with open(xml_path, "w", encoding="utf-8") as _f:
+                    _f.write(_xml)
+                logger.info(f"  [{inst_name}] MuseScore XML ({note_count} notes): {xml_path}")
                 success = True
             else:
-                logger.warning(f"  [{inst_name}] MuseScore CLI failed (rc={result.returncode}): "
-                               f"{result.stderr[:200]}")
+                logger.warning(f"  [{inst_name}] MuseScore CLI failed (rc={result.returncode})")
         else:
             logger.warning(f"  [{inst_name}] MuseScore not found at {musescore}")
     except Exception as exc:
-        logger.warning(f"  [{inst_name}] MIDI→MuseScore export failed: {exc}")
+        logger.warning(f"  [{inst_name}] MuseScore export failed: {exc}")
 
-    # Method B: fallback to music21 export_score
+    # Fallback: score_assemble → export_score
     if not success:
         try:
             result_path = export_score(score, output_stem)
             if result_path is not None:
                 logger.info(f"  [{inst_name}] Exported via music21 fallback ({note_count} notes): {result_path}")
                 success = True
-            else:
-                logger.error(f"  [{inst_name}] music21 export returned None")
         except Exception as exc:
             logger.error(f"  [{inst_name}] music21 export crashed: {exc}", exc_info=True)
 
