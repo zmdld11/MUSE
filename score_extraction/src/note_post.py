@@ -212,24 +212,30 @@ def refine_notes(candidates: list[dict], audio: np.ndarray = None,
     # Sort by onset (again after grouping)
     notes.sort(key=lambda n: n["onset"])
 
-    # Step 6: Key-based filtering — keep only C major scale notes,
-    # except those that have nearby neighbor support (within 3 semitones, 0.5s)
-    c_major = {0, 2, 4, 5, 7, 9, 11}  # pitch classes (C D E F G A B)
+    # Step 6: Key-based filtering — auto-detect scale from note distribution
+    # Count pitch class occurrences (weighted by duration)
+    pc_duration = np.zeros(12)
+    for n in notes:
+        dur = n["offset"] - n["onset"]
+        pc_duration[n["pitch"] % 12] += dur
+    # Top 7 pitch classes form the detected scale
+    scale_order = np.argsort(-pc_duration)
+    detected_scale = set(scale_order[:7].tolist())
+    logger.debug(f"  Detected pitch classes: {sorted(detected_scale)}")
+
     filtered = []
     for n in notes:
         pc = n["pitch"] % 12
-        if pc in c_major:
+        if pc in detected_scale:
             filtered.append(n)
             continue
-        # Check if there's a neighbor note within 3 semitones and 0.5s
+        # Keep non-scale notes if they have harmonic neighbor support
         has_neighbor = False
         for other in notes:
             if other is n:
                 continue
             if abs(other["pitch"] - n["pitch"]) <= 3:
-                overlap_front = max(n["onset"], other["onset"])
-                overlap_back = min(n["offset"], other["offset"])
-                if overlap_back - overlap_front > 0.5:
+                if abs(other["onset"] - n["onset"]) < 0.5:
                     has_neighbor = True
                     break
         if has_neighbor:
@@ -237,7 +243,8 @@ def refine_notes(candidates: list[dict], audio: np.ndarray = None,
 
     removed_count = len(notes) - len(filtered)
     if removed_count > 0:
-        logger.info(f"  Key-based filter: removed {removed_count} non-C-major notes without neighbor support")
+        logger.info(f"  Key-based filter: removed {removed_count} non-scale notes"
+                     f" (scale={sorted(detected_scale)})")
     notes = filtered
 
     return notes
