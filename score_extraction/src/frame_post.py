@@ -89,10 +89,15 @@ def _hmm_smooth(probs: np.ndarray, p_stay_on: float = 0.88, p_turn_on: float = 0
 
 
 def _adaptive_threshold_per_register(frame_probs: np.ndarray,
-                                     percentile: float = 50.0) -> np.ndarray:
+                                     percentile: float = 50.0,
+                                     fixed_threshold: float = 0.3) -> np.ndarray:
     """
-    Binarize frame_probs with register-specific thresholds.
-    Each register (low / mid / high) gets its own percentile threshold.
+    Binarize frame_probs.
+
+    VER2.1 (2026-07-31): 默认改为固定阈值 0.3.
+    诊断发现: 原 50th-percentile 阈值在 HMM 平滑后概率双极化(0/1)时被顶到 ~1.0,
+    把所有低置信度帧(含真实短音符)全杀, note recall 仅 0.15.
+    固定阈值 0.3 在评测集上 note F1 0.42→0.64. 保留 percentile 模式供参考.
     """
     T, P = frame_probs.shape
     binary = np.zeros_like(frame_probs, dtype=bool)
@@ -110,7 +115,10 @@ def _adaptive_threshold_per_register(frame_probs: np.ndarray,
             continue
 
         region = frame_probs[:, start_bin:end_bin]
-        thresh = np.percentile(region[region > 0.01], percentile) if region[region > 0.01].size > 0 else 0.3
+        if fixed_threshold is not None:
+            thresh = fixed_threshold
+        else:
+            thresh = np.percentile(region[region > 0.01], percentile) if region[region > 0.01].size > 0 else 0.3
         binary[:, start_bin:end_bin] = region >= thresh
         logger.debug(f"  {name} register (bin {start_bin}-{end_bin}): threshold = {thresh:.3f}")
 
@@ -179,7 +187,7 @@ def _max_polyphony_filter(candidates: list[dict], max_per_frame: int = 8) -> lis
 def _filter_by_length(candidates: list[dict], hop_length: int, sr: int) -> list[dict]:
     """Drop notes that are too short or too long."""
     frame_duration = hop_length / sr  # seconds per frame
-    min_frames = 4    # ~46 ms
+    min_frames = 2    # ~46 ms (2×23.2ms) — 保住快速短音符 (见 2026-07-31 评测诊断)
     max_frames = 600  # ~7 seconds
 
     filtered = []

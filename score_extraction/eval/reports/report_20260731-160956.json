@@ -1,0 +1,37 @@
+{
+  "timestamp": "20260731-160956",
+  "dataset": "GiantMIDI-PIano (synthetic FluidSynth)",
+  "n_requested": 2,
+  "seed": 42,
+  "results": [
+    {
+      "model": "ours",
+      "n_songs": 1,
+      "frame_f1": 0.9978187447227694,
+      "frame_precision": 0.9978187447227694,
+      "frame_recall": 0.9978187447227694,
+      "note_f1": 0.4065040650406504,
+      "note_precision": 0.8928571428571429,
+      "note_recall": 0.2631578947368421,
+      "offset_f1": 0.21138211382113825,
+      "offset_precision": 0.4642857142857143,
+      "offset_recall": 0.1368421052631579,
+      "per_song": [
+        {
+          "frame_precision": 0.9978187447227694,
+          "frame_recall": 0.9978187447227694,
+          "frame_f1": 0.9978187447227694,
+          "note_precision": 0.8928571428571429,
+          "note_recall": 0.2631578947368421,
+          "note_f1": 0.4065040650406504,
+          "offset_precision": 0.4642857142857143,
+          "offset_recall": 0.1368421052631579,
+          "offset_f1": 0.21138211382113825,
+          "name": "Lange, Gustav, Aus des Lebens Mai, Op.292, G8ULJn55A7Y.mid",
+          "n_gt_notes": 95,
+          "n_est_notes": 28
+        }
+      ]
+    }
+  ]
+}

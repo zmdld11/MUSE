@@ -1,0 +1,94 @@
+{
+  "timestamp": "20260731-161210",
+  "dataset": "GiantMIDI-PIano (synthetic FluidSynth)",
+  "n_requested": 2,
+  "seed": 42,
+  "results": [
+    {
+      "model": "ours",
+      "n_songs": 2,
+      "frame_f1": 0.9975636785814804,
+      "frame_precision": 0.9975636785814804,
+      "frame_recall": 0.9975636785814804,
+      "note_f1": 0.2979122266950825,
+      "note_precision": 0.828781512605042,
+      "note_recall": 0.18559556786703602,
+      "offset_f1": 0.1566619306969769,
+      "offset_precision": 0.4380252100840336,
+      "offset_recall": 0.09750692520775624,
+      "per_song": [
+        {
+          "frame_precision": 0.9978187447227694,
+          "frame_recall": 0.9978187447227694,
+          "frame_f1": 0.9978187447227694,
+          "note_precision": 0.8928571428571429,
+          "note_recall": 0.2631578947368421,
+          "note_f1": 0.4065040650406504,
+          "offset_precision": 0.4642857142857143,
+          "offset_recall": 0.1368421052631579,
+          "offset_f1": 0.21138211382113825,
+          "name": "Lange, Gustav, Aus des Lebens Mai, Op.292, G8ULJn55A7Y.mid",
+          "n_gt_notes": 95,
+          "n_est_notes": 28
+        },
+        {
+          "frame_precision": 0.9973086124401914,
+          "frame_recall": 0.9973086124401914,
+          "frame_f1": 0.9973086124401914,
+          "note_precision": 0.7647058823529411,
+          "note_recall": 0.10803324099722991,
+          "note_f1": 0.18932038834951456,
+          "offset_precision": 0.4117647058823529,
+          "offset_recall": 0.05817174515235457,
+          "offset_f1": 0.10194174757281553,
+          "name": "Scarlatti, Domenico, Keyboard Sonata in F major, K.445, aonverKMWfQ.mid",
+          "n_gt_notes": 361,
+          "n_est_notes": 57
+        }
+      ]
+    },
+    {
+      "model": "basic",
+      "n_songs": 2,
+      "frame_f1": 0.0,
+      "frame_precision": 0.0,
+      "frame_recall": 0.0,
+      "note_f1": 0.27273162786241256,
+      "note_precision": 0.3764399851356373,
+      "note_recall": 0.21385041551246536,
+      "offset_f1": 0.06866197183098591,
+      "offset_precision": 0.09420289855072464,
+      "offset_recall": 0.054016620498614956,
+      "per_song": [
+        {
+          "frame_precision": 0.0,
+          "frame_recall": 0.0,
+          "frame_f1": 0.0,
+          "note_precision": 0.15384615384615385,
+          "note_recall": 0.08421052631578947,
+          "note_f1": 0.108843537414966,
+          "offset_precision": 0.0,
+          "offset_recall": 0.0,
+          "offset_f1": 0.0,
+          "name": "Lange, Gustav, Aus des Lebens Mai, Op.292, G8ULJn55A7Y.mid",
+          "n_gt_notes": 95,
+          "n_est_notes": 52
+        },
+        {
+          "frame_precision": 0.0,
+          "frame_recall": 0.0,
+          "frame_f1": 0.0,
+          "note_precision": 0.5990338164251208,
+          "note_recall": 0.34349030470914127,
+          "note_f1": 0.43661971830985913,
+          "offset_precision": 0.18840579710144928,
+          "offset_recall": 0.10803324099722991,
+          "offset_f1": 0.13732394366197181,
+          "name": "Scarlatti, Domenico, Keyboard Sonata in F major, K.445, aonverKMWfQ.mid",
+          "n_gt_notes": 361,
+          "n_est_notes": 207
+        }
+      ]
+    }
+  ]
+}
