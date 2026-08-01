@@ -90,14 +90,13 @@ def _hmm_smooth(probs: np.ndarray, p_stay_on: float = 0.88, p_turn_on: float = 0
 
 def _adaptive_threshold_per_register(frame_probs: np.ndarray,
                                      percentile: float = 50.0,
-                                     fixed_threshold: float = 0.3) -> np.ndarray:
+                                     fixed_threshold: float = None) -> np.ndarray:
     """
     Binarize frame_probs.
 
-    VER2.1 (2026-07-31): 默认改为固定阈值 0.3.
-    诊断发现: 原 50th-percentile 阈值在 HMM 平滑后概率双极化(0/1)时被顶到 ~1.0,
-    把所有低置信度帧(含真实短音符)全杀, note recall 仅 0.15.
-    固定阈值 0.3 在评测集上 note F1 0.42→0.64. 保留 percentile 模式供参考.
+    默认: 50th-percentile 自适应阈值 (per register).
+    曾尝试改固定 0.3, 但 A/B 评测证明 precision 从 0.525 砸到 0.307,
+    recall 反而降, 是错误配置. 保留 fixed_threshold 参数仅作实验.
     """
     T, P = frame_probs.shape
     binary = np.zeros_like(frame_probs, dtype=bool)
