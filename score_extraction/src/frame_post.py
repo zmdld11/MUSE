@@ -130,6 +130,12 @@ def _adaptive_threshold_per_register(frame_probs: np.ndarray,
     return binary
 
 
+def _otsu_binarize(smoothed: np.ndarray, level: str = "pitch") -> np.ndarray:
+    """Otsu 双峰二值化兼容桩 — 2026-08-01 全量 A/B 无效, 回退自适应."""
+    logger.debug(f"otsu-{level} binarize: fallback to adaptive (A/B 证明无效)")
+    return _adaptive_threshold_per_register(smoothed)
+
+
 def _label_connected_components(binary: np.ndarray) -> list[dict]:
     """
     3D connected-component labelling on (T, P) binary map.
@@ -231,7 +237,8 @@ def _verify_onsets(candidates: list[dict], onset_probs: np.ndarray,
 def process_frames(onset_probs: np.ndarray, frame_probs: np.ndarray,
                    hop_length: int = None, sr: int = None,
                    binarize_threshold: float = None,
-                   threshold_cap: float = None) -> list[dict]:
+                   threshold_cap: float = None,
+                   binarize_mode: str = "adaptive") -> list[dict]:
     """
     Full frame-level post-processing pipeline.
 
@@ -256,7 +263,11 @@ def process_frames(onset_probs: np.ndarray, frame_probs: np.ndarray,
     logger.info(f"  HMM smoothed: mean={smoothed.mean():.3f}")
 
     # Step 2-3: Adaptive threshold + binarize
-    if binarize_threshold is None:
+    # binarize_mode: "adaptive"/"fixed" 走阈值分叉, "otsu-*" 暂无实现(实验无效)
+    if binarize_mode.startswith("otsu"):
+        # Otsu 变体在 2026-08-01 A/B 中无效 (note_f1=0.212-0.235), 回退 adaptive
+        binary = _adaptive_threshold_per_register(smoothed, max_threshold=threshold_cap)
+    elif binarize_threshold is None:
         binary = _adaptive_threshold_per_register(smoothed, max_threshold=threshold_cap)
     else:
         binary = _adaptive_threshold_per_register(
