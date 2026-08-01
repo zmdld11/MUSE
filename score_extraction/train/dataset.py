@@ -57,17 +57,24 @@ class PianoSynthDataset(Dataset):
 
         logger.info("PianoSynthDataset: %d MIDI files", len(self.midi_paths))
 
-        # Pre-compute valid files (quick parse to filter broken ones)
+        # Pre-compute valid files — cache-first to avoid slow pretty_midi parse
+        try:
+            cache_dir_entries = set(os.listdir(CACHE_DIR))
+        except Exception:
+            cache_dir_entries = set()
         self.valid_paths = []
         for p in self.midi_paths:
-            try:
-                import pretty_midi
-                pm = pretty_midi.PrettyMIDI(p)
-                end = pm.get_end_time()
-                if end > 5.0:  # at least 5 seconds
-                    self.valid_paths.append(p)
-            except Exception:
-                pass
+            cp = os.path.basename(_cache_path(p, self.max_dur_sec))
+            if cp in cache_dir_entries:
+                self.valid_paths.append(p)
+            else:
+                try:
+                    import pretty_midi
+                    pm = pretty_midi.PrettyMIDI(p)
+                    if pm.get_end_time() > 5.0:
+                        self.valid_paths.append(p)
+                except Exception:
+                    pass
         logger.info("  Valid (>5s): %d", len(self.valid_paths))
 
     def __len__(self):
