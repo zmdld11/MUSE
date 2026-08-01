@@ -132,7 +132,8 @@ def _merge_duplicates(notes: list[dict], max_gap_sec: float = 0.05) -> list[dict
 
 
 def refine_notes(candidates: list[dict], audio: np.ndarray = None,
-                 sr: int = None, hop_length: int = None) -> list[dict]:
+                 sr: int = None, hop_length: int = None,
+                 key_filter: bool = True) -> list[dict]:
     """
     Full note-level post-processing pipeline.
 
@@ -145,6 +146,9 @@ def refine_notes(candidates: list[dict], audio: np.ndarray = None,
     Returns:
         list of cleaned note dicts with keys:
         onset, offset (in seconds), pitch, confidence, amplitude
+
+    key_filter: True = 保留 top-7 音级"调性过滤"（默认现状）;
+                False = 跳过该过滤（2026-08-01 A/B 验证其影响）
     """
     sr = sr or config.SR
     hop_length = hop_length or config.HOP_LENGTH
@@ -213,38 +217,39 @@ def refine_notes(candidates: list[dict], audio: np.ndarray = None,
     notes.sort(key=lambda n: n["onset"])
 
     # Step 6: Key-based filtering — auto-detect scale from note distribution
-    # Count pitch class occurrences (weighted by duration)
-    pc_duration = np.zeros(12)
-    for n in notes:
-        dur = n["offset"] - n["onset"]
-        pc_duration[n["pitch"] % 12] += dur
-    # Top 7 pitch classes form the detected scale
-    scale_order = np.argsort(-pc_duration)
-    detected_scale = set(scale_order[:7].tolist())
-    logger.debug(f"  Detected pitch classes: {sorted(detected_scale)}")
+    if key_filter:
+        # Count pitch class occurrences (weighted by duration)
+        pc_duration = np.zeros(12)
+        for n in notes:
+            dur = n["offset"] - n["onset"]
+            pc_duration[n["pitch"] % 12] += dur
+        # Top 7 pitch classes form the detected scale
+        scale_order = np.argsort(-pc_duration)
+        detected_scale = set(scale_order[:7].tolist())
+        logger.debug(f"  Detected pitch classes: {sorted(detected_scale)}")
 
-    filtered = []
-    for n in notes:
-        pc = n["pitch"] % 12
-        if pc in detected_scale:
-            filtered.append(n)
-            continue
-        # Keep non-scale notes if they have harmonic neighbor support
-        has_neighbor = False
-        for other in notes:
-            if other is n:
+        filtered = []
+        for n in notes:
+            pc = n["pitch"] % 12
+            if pc in detected_scale:
+                filtered.append(n)
                 continue
-            if abs(other["pitch"] - n["pitch"]) <= 3:
-                if abs(other["onset"] - n["onset"]) < 0.5:
-                    has_neighbor = True
-                    break
-        if has_neighbor:
-            filtered.append(n)
+            # Keep non-scale notes if they have harmonic neighbor support
+            has_neighbor = False
+            for other in notes:
+                if other is n:
+                    continue
+                if abs(other["pitch"] - n["pitch"]) <= 3:
+                    if abs(other["onset"] - n["onset"]) < 0.5:
+                        has_neighbor = True
+                        break
+            if has_neighbor:
+                filtered.append(n)
 
-    removed_count = len(notes) - len(filtered)
-    if removed_count > 0:
-        logger.info(f"  Key-based filter: removed {removed_count} non-scale notes"
-                     f" (scale={sorted(detected_scale)})")
-    notes = filtered
+        removed_count = len(notes) - len(filtered)
+        if removed_count > 0:
+            logger.info(f"  Key-based filter: removed {removed_count} non-scale notes"
+                         f" (scale={sorted(detected_scale)})")
+        notes = filtered
 
     return notes

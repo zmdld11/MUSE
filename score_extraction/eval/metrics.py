@@ -24,7 +24,9 @@ MIDI_OFFSET = 21              # 88 音高矩阵中 MIDI 21 = 第一个 bin
 # 帧级指标
 # ---------------------------------------------------------------------------
 
-def _binarize_frame_probs(frame_probs: np.ndarray) -> np.ndarray:
+def _binarize_frame_probs(frame_probs: np.ndarray,
+                          binarize_threshold: float = None,
+                          threshold_cap: float = None) -> np.ndarray:
     """用后处理管线的同一套二值化 (HMM 平滑 + 注册自适应阈值).
 
     与 src.frame_post 的 process_frames 保持一致, 使帧级指标
@@ -32,11 +34,16 @@ def _binarize_frame_probs(frame_probs: np.ndarray) -> np.ndarray:
     """
     from src.frame_post import _hmm_smooth, _adaptive_threshold_per_register
     smoothed = _hmm_smooth(frame_probs)
-    return _adaptive_threshold_per_register(smoothed)
+    if binarize_threshold is None:
+        return _adaptive_threshold_per_register(smoothed, max_threshold=threshold_cap)
+    return _adaptive_threshold_per_register(
+        smoothed, fixed_threshold=float(binarize_threshold))
 
 
 def _frame_probs_to_times_freqs(frame_probs: np.ndarray,
-                                hop_length: int, sr: int) -> tuple:
+                                hop_length: int, sr: int,
+                                binarize_threshold: float = None,
+                                threshold_cap: float = None) -> tuple:
     """把 (T, P) 概率矩阵转成 mir_eval.multipitch 需要的 (times, freqs).
 
     帧级"活跃"定义 = 后处理管线的二值化输出 (HMM + 自适应阈值).
@@ -46,7 +53,8 @@ def _frame_probs_to_times_freqs(frame_probs: np.ndarray,
     T, P = frame_probs.shape
     times = np.arange(T) * hop_length / sr
 
-    active = _binarize_frame_probs(frame_probs).astype(bool)
+    active = _binarize_frame_probs(
+        frame_probs, binarize_threshold, threshold_cap).astype(bool)
     freqs = np.full((T, P), np.nan)
     for t in range(T):
         bins = np.nonzero(active[t])[0]
@@ -99,10 +107,13 @@ def _resample_probs_to_grid(est_frame_probs: np.ndarray,
 
 
 def frame_f1(gt_frame_labels: np.ndarray, est_frame_probs: np.ndarray,
-             hop_length: int = 512, sr: int = 22050) -> tuple:
+             hop_length: int = 512, sr: int = 22050,
+             binarize_threshold: float = None,
+             threshold_cap: float = None) -> tuple:
     """帧级 F1 (要求两者已在同一 hop 网格上). GT 二值标签, 预测概率矩阵."""
     ref_times, ref_freqs = _frame_labels_to_times_freqs(gt_frame_labels, hop_length, sr)
-    est_times, est_freqs = _frame_probs_to_times_freqs(est_frame_probs, hop_length, sr)
+    est_times, est_freqs = _frame_probs_to_times_freqs(
+        est_frame_probs, hop_length, sr, binarize_threshold, threshold_cap)
     try:
         res = mir_eval.multipitch.evaluate(ref_times, ref_freqs, est_times, est_freqs)
         p, r = float(res["Precision"]), float(res["Recall"])
@@ -161,7 +172,9 @@ def note_offset_f1(gt_intervals: np.ndarray, gt_pitches: np.ndarray,
 
 
 def evaluate(gt: dict, est_frame_probs: np.ndarray, est_notes: list[dict],
-             hop_length: int = 512, sr: int = 22050) -> dict:
+             hop_length: int = 512, sr: int = 22050,
+             binarize_threshold: float = None,
+             threshold_cap: float = None) -> dict:
     """对一个样本计算全部三级指标.
 
     Parameters
@@ -181,7 +194,9 @@ def evaluate(gt: dict, est_frame_probs: np.ndarray, est_notes: list[dict],
     est_on_gt_grid = _resample_probs_to_grid(
         est_frame_probs, est_hop=hop_length, n_ref_frames=n_ref_frames)
     fp, fr, ff = frame_f1(gt["frame_labels"], est_on_gt_grid,
-                          hop_length=512, sr=sr)
+                          hop_length=512, sr=sr,
+                          binarize_threshold=binarize_threshold,
+                          threshold_cap=threshold_cap)
     np_, nr, nf = note_f1(gt["intervals"], gt["pitches"], est_notes)
     op, or_, of = note_offset_f1(gt["intervals"], gt["pitches"], est_notes)
     return {

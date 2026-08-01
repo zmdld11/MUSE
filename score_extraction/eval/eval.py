@@ -21,6 +21,14 @@ import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+# 2026-08-01: numba 编译缓存默认写系统临时目录, 受限环境下会无限挂起.
+# 启动时把缓存目录与临时目录指到项目内可写位置 (必须在首次 librosa.stft 前生效).
+_PROJECT_TMP = os.path.abspath(os.path.join(os.path.dirname(__file__), "reports", "tmp"))
+os.makedirs(_PROJECT_TMP, exist_ok=True)
+os.environ.setdefault("NUMBA_CACHE_DIR", os.path.join(_PROJECT_TMP, "numba_cache"))
+os.environ.setdefault("TMP", _PROJECT_TMP)
+os.environ.setdefault("TEMP", _PROJECT_TMP)
+
 from eval.dataset import load, sample_midis
 from eval.metrics import evaluate
 
@@ -58,7 +66,10 @@ def _transcribe_basic(audio: np.ndarray, tmp_path: str) -> dict:
     return _basic_pitch_inference(tmp_path)
 
 
-def _postprocess(result: dict, audio: np.ndarray) -> tuple:
+def _postprocess(result: dict, audio: np.ndarray,
+                 binarize_threshold: float = None,
+                 key_filter: bool = True,
+                 threshold_cap: float = None) -> tuple:
     """帧/音符级后处理, 返回 (est_frame_probs, est_notes)."""
     from src.frame_post import process_frames
     from src.note_post import refine_notes
@@ -69,13 +80,17 @@ def _postprocess(result: dict, audio: np.ndarray) -> tuple:
     candidates = process_frames(
         result["onset_probs"], result["frame_probs"],
         hop_length=hop, sr=sr,
+        binarize_threshold=binarize_threshold,
+        threshold_cap=threshold_cap,
     )
-    notes = refine_notes(candidates, audio, sr=sr, hop_length=hop)
+    notes = refine_notes(candidates, audio, sr=sr, hop_length=hop,
+                         key_filter=key_filter)
     return result["frame_probs"], notes
 
 
 def run_one(mid_path: str, model_name: str, tmp_path: str,
-            use_cache: bool = True) -> dict:
+            use_cache: bool = True, binarize_threshold: float = None,
+            key_filter: bool = True, threshold_cap: float = None) -> dict:
     """评测一首曲目, 返回指标 dict."""
     gt = load(mid_path) if use_cache else load(mid_path, force_render=True)
     audio = gt["audio"]
@@ -85,10 +100,14 @@ def run_one(mid_path: str, model_name: str, tmp_path: str,
     else:
         result = _transcribe_basic(audio, tmp_path)
 
-    est_frame_probs, est_notes = _postprocess(result, audio)
+    est_frame_probs, est_notes = _postprocess(
+        result, audio, binarize_threshold=binarize_threshold,
+        key_filter=key_filter, threshold_cap=threshold_cap)
     hop = result.get("hop_length", HOP.get(model_name, 512))
 
-    metrics = evaluate(gt, est_frame_probs, est_notes, hop_length=hop, sr=SR)
+    metrics = evaluate(gt, est_frame_probs, est_notes, hop_length=hop, sr=SR,
+                       binarize_threshold=binarize_threshold,
+                       threshold_cap=threshold_cap)
     metrics["name"] = os.path.basename(mid_path)
     metrics["n_gt_notes"] = int(len(gt["intervals"]))
     metrics["n_est_notes"] = int(len(est_notes))
@@ -99,14 +118,20 @@ def run_one(mid_path: str, model_name: str, tmp_path: str,
 # 评测主体
 # ---------------------------------------------------------------------------
 
-def evaluate_model(model_name: str, midis: list[str], out_dir: str) -> dict:
+def evaluate_model(model_name: str, midis: list[str], out_dir: str,
+                   binarize_threshold: float = None,
+                   key_filter: bool = True,
+                   threshold_cap: float = None) -> dict:
     """对指定模型跑完整评测, 返回聚合结果."""
     results = []
     tmp_path = os.path.join(out_dir, "_tmp.wav")
 
     for i, mid in enumerate(midis, 1):
         try:
-            r = run_one(mid, model_name, tmp_path)
+            r = run_one(mid, model_name, tmp_path,
+                        binarize_threshold=binarize_threshold,
+                        key_filter=key_filter,
+                        threshold_cap=threshold_cap)
             logger.info(
                 f"[{i}/{len(midis)}] {r['name'][:40]:42s} "
                 f"frame={r['frame_f1']:.3f} note={r['note_f1']:.3f} "
@@ -145,6 +170,12 @@ def main():
     ap.add_argument("--n", type=int, default=40, help="评测曲目数")
     ap.add_argument("--seed", type=int, default=42, help="采样 seed")
     ap.add_argument("--out-dir", default=None, help="报告输出目录 (默认 eval/reports)")
+    ap.add_argument("--threshold", default="adaptive",
+                    help="二值化阈值: adaptive / 0.3 / 0.5 (固定阈值作用于 HMM 平滑后验)")
+    ap.add_argument("--threshold-cap", type=float, default=None,
+                    help="自适应 percentile 的上限 (防止密集乐段阈值≈1.0 杀真音符)")
+    ap.add_argument("--key-filter", choices=["on", "off"], default="on",
+                    help="note_post 调性过滤开关 (2026-08-01 A/B)")
     args = ap.parse_args()
 
     logging.basicConfig(
@@ -169,10 +200,19 @@ def main():
     }
 
     models = ["ours", "basic"] if args.model == "both" else [args.model]
+    binarize_threshold = None if args.threshold == "adaptive" else float(args.threshold)
+    key_filter = args.key_filter == "on"
     for m in models:
-        logger.info(f"\n=== 评测模型: {m} ===")
-        agg = evaluate_model(m, midis, out_dir)
+        logger.info(f"\n=== 评测模型: {m}  threshold={args.threshold}  "
+                    f"key_filter={args.key_filter} ===")
+        agg = evaluate_model(m, midis, out_dir,
+                             binarize_threshold=binarize_threshold,
+                             key_filter=key_filter,
+                             threshold_cap=args.threshold_cap)
         report["results"].append(agg)
+    report["threshold"] = args.threshold
+    report["threshold_cap"] = args.threshold_cap
+    report["key_filter"] = args.key_filter
 
     report_path = os.path.join(out_dir, f"report_{timestamp}.json")
     with open(report_path, "w", encoding="utf-8") as f:

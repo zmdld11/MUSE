@@ -165,8 +165,9 @@ def _report_match_quality(res, audio, gt, hop):
     print(f"  最终音符数: {len(notes)} vs GT {len(gt['intervals'])}")
 
     # 用 mir_eval 匹配看 onset 偏差
-    est_intervals = np.array([[n["onset"], n["offset"]] for n in notes])
-    est_pitches = np.array([int(n["pitch"]) for n in notes])
+    valid = [n for n in notes if n["offset"] - n["onset"] >= 1e-4]
+    est_intervals = np.array([[n["onset"], n["offset"]] for n in valid])
+    est_pitches = np.array([int(n["pitch"]) for n in valid])
     if len(est_intervals) == 0:
         print("  无音符! 全漏")
         return
