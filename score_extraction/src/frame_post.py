@@ -90,13 +90,17 @@ def _hmm_smooth(probs: np.ndarray, p_stay_on: float = 0.88, p_turn_on: float = 0
 
 def _adaptive_threshold_per_register(frame_probs: np.ndarray,
                                      percentile: float = 50.0,
-                                     fixed_threshold: float = None) -> np.ndarray:
+                                     fixed_threshold: float = None,
+                                     max_threshold: float = None) -> np.ndarray:
     """
     Binarize frame_probs.
 
     默认: 50th-percentile 自适应阈值 (per register).
     曾尝试改固定 0.3, 但 A/B 评测证明 precision 从 0.525 砸到 0.307,
     recall 反而降, 是错误配置. 保留 fixed_threshold 参数仅作实验.
+
+    2026-08-01: 新增 max_threshold 上限 — percentile 在密集乐段会被顶到 ~1.0,
+    杀掉 HMM 后验 0.96-0.99 的真音符; 设上限可防止该问题同时保留自适应性.
     """
     T, P = frame_probs.shape
     binary = np.zeros_like(frame_probs, dtype=bool)
@@ -118,6 +122,8 @@ def _adaptive_threshold_per_register(frame_probs: np.ndarray,
             thresh = fixed_threshold
         else:
             thresh = np.percentile(region[region > 0.01], percentile) if region[region > 0.01].size > 0 else 0.3
+        if max_threshold is not None:
+            thresh = min(thresh, float(max_threshold))
         binary[:, start_bin:end_bin] = region >= thresh
         logger.debug(f"  {name} register (bin {start_bin}-{end_bin}): threshold = {thresh:.3f}")
 
@@ -223,13 +229,18 @@ def _verify_onsets(candidates: list[dict], onset_probs: np.ndarray,
 
 
 def process_frames(onset_probs: np.ndarray, frame_probs: np.ndarray,
-                   hop_length: int = None, sr: int = None) -> list[dict]:
+                   hop_length: int = None, sr: int = None,
+                   binarize_threshold: float = None,
+                   threshold_cap: float = None) -> list[dict]:
     """
     Full frame-level post-processing pipeline.
 
     Args:
         onset_probs:  (T, 88)  onset probabilities
         frame_probs:  (T, 88)  frame (note presence) probabilities
+        binarize_threshold: None = 自适应 percentile（默认）;
+                            float = 固定阈值直接作用于 HMM 平滑后验（A/B 用）
+        threshold_cap: 自适应 percentile 的上限（防止密集乐段阈值被顶到 ~1.0）
 
     Returns:
         List of candidate note dicts with keys:
@@ -245,7 +256,11 @@ def process_frames(onset_probs: np.ndarray, frame_probs: np.ndarray,
     logger.info(f"  HMM smoothed: mean={smoothed.mean():.3f}")
 
     # Step 2-3: Adaptive threshold + binarize
-    binary = _adaptive_threshold_per_register(smoothed)
+    if binarize_threshold is None:
+        binary = _adaptive_threshold_per_register(smoothed, max_threshold=threshold_cap)
+    else:
+        binary = _adaptive_threshold_per_register(
+            smoothed, fixed_threshold=float(binarize_threshold))
     active = binary.sum()
     logger.info(f"  Binary: {active} active bins ({active / binary.size * 100:.2f}%)")
 

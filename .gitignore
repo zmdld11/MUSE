@@ -68,3 +68,11 @@ fluid_dll/
 scoremill/
 MUSENote/
 汇报/
+
+# Eval 运行产物（numba 缓存/临时目录/诊断 scratch）
+score_extraction/eval/reports/tmp/
+score_extraction/eval/reports/numba_cache/
+score_extraction/eval/reports/_*.wav
+score_extraction/eval/reports/_*_verify.py
+score_extraction/eval/reports/_diag_verify.txt
+score_extraction/eval/reports/_poly_verify.txt
