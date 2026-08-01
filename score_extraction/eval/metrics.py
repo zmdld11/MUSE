@@ -117,23 +117,29 @@ def frame_f1(gt_frame_labels: np.ndarray, est_frame_probs: np.ndarray,
 # 音符级指标
 # ---------------------------------------------------------------------------
 
+def _midi_to_hz(midi: np.ndarray) -> np.ndarray:
+    """MIDI 音高号 → 赫兹 (mir_eval.transcription 的 pitch 单位是 Hz!)."""
+    return 440.0 * 2 ** ((np.asarray(midi, dtype=np.float64) - 69) / 12.0)
+
+
 def _notes_to_mir_eval(notes: list[dict]) -> tuple:
-    """把 note dict 列表 (onset/offset/pitch) 转成 mir_eval.transcription 格式."""
+    """把 note dict 列表 (onset/offset/pitch MIDI号) 转成 mir_eval 格式 (pitch→Hz)."""
     notes = [n for n in notes
              if n["pitch"] > 0 and n["offset"] - n["onset"] >= 1e-4]
     if not notes:
-        return np.zeros((0, 2)), np.zeros(0, dtype=int)
+        return np.zeros((0, 2)), np.zeros(0, dtype=np.float64)
     intervals = np.array([[n["onset"], n["offset"]] for n in notes])
-    pitches = np.array([int(n["pitch"]) for n in notes])
-    return intervals, pitches
+    pitches_hz = _midi_to_hz(np.array([int(n["pitch"]) for n in notes]))
+    return intervals, pitches_hz
 
 
 def note_f1(gt_intervals: np.ndarray, gt_pitches: np.ndarray,
             est_notes: list[dict]) -> tuple:
-    """音符级 F1 — onset-only (offset 忽略)."""
+    """音符级 F1 — onset-only (offset 忽略). GT pitches 为 MIDI 号, 转 Hz."""
+    gt_pitches_hz = _midi_to_hz(gt_pitches)
     est_intervals, est_pitches = _notes_to_mir_eval(est_notes)
     p, r, f, _ = mir_eval.transcription.precision_recall_f1_overlap(
-        gt_intervals, gt_pitches, est_intervals, est_pitches,
+        gt_intervals, gt_pitches_hz, est_intervals, est_pitches,
         onset_tolerance=ONSET_TOLERANCE,
         offset_ratio=None,
     )
@@ -143,9 +149,10 @@ def note_f1(gt_intervals: np.ndarray, gt_pitches: np.ndarray,
 def note_offset_f1(gt_intervals: np.ndarray, gt_pitches: np.ndarray,
                    est_notes: list[dict]) -> tuple:
     """音符级 F1 — 含 offset (onset ≤ 50ms & offset ≤ max(50ms, 20%×符长))."""
+    gt_pitches_hz = _midi_to_hz(gt_pitches)
     est_intervals, est_pitches = _notes_to_mir_eval(est_notes)
     p, r, f, _ = mir_eval.transcription.precision_recall_f1_overlap(
-        gt_intervals, gt_pitches, est_intervals, est_pitches,
+        gt_intervals, gt_pitches_hz, est_intervals, est_pitches,
         onset_tolerance=ONSET_TOLERANCE,
         offset_ratio=OFFSET_RATIO,
         offset_min_tolerance=OFFSET_MIN_TOLERANCE,
