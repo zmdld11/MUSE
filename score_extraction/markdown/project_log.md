@@ -386,3 +386,28 @@
 4. `min_note_len=11` 帧，但配合 melodia 找回短音符
 
 **结论**：我们的后处理设计（自适应阈值≈1.0 + 2D 连通域 + 调性过滤）是根本性错误。正确的路是**抄 basic-pitch 的逐音高 + melodia 后处理**，或直接采用官方 note_events（0.691）。
+
+---
+
+## 2026-08-02 — 🔥 后处理改造成功：BP 逐音高 + melodia (note_f1 0.294 → 0.740)
+
+**改造**（`src/frame_post.py`）：移植 basic-pitch 官方后处理 `output_to_notes_polyphonic`：
+1. 逐音高 `argrelmax` 找 onset 峰值（无 2D 连通域）
+2. onset 向下扩展直到帧能量 < frame_thresh
+3. **melodia_trick**：扫描剩余能量最高帧向前后扩展，找回无 onset 峰值的音符
+
+**关键修复（踩坑 3 个）**：
+1. **note_post 必须跳过**——BP 候选 135 个被谐波/调性过滤砍到 60（note_f1 0.70→0.27）。官方后处理无此步骤
+2. **hop=256 窗口偏移校正**——basic-pitch 滑窗推理的帧索引→秒需 `model_frames_to_time`（magic 0.0018 偏移），否则所有 onset 偏 73ms 全对不上
+3. **hop=512（自训模型）不能用窗口校正**——无滑窗，直接用 `frame*hop/sr`，否则时间轴错一半
+
+**全量 40 首结果**：
+
+| 模型 | 旧后处理 | BP后处理 | 提升 |
+|------|---------|---------|------|
+| VER2.0_Bootstrap | 0.294 | **0.740** | +152% |
+| basic-pitch | 0.311 | **0.691** | +122% |
+
+**ours: P=0.867 R=0.704 offset_f1=0.543 frame_f1=0.993**
+
+**达标**：发行验收档位①（note_f1≥0.7 ✅ offset_f1≥0.45 ✅）——后处理一直是真瓶颈，模型从未有问题。
