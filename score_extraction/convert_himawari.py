@@ -111,6 +111,15 @@ def parse_line(line, delay_ms=731):
 
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser(description="txt 简谱 → MIDI + MusicXML")
+    ap.add_argument("--transpose", type=int, default=0,
+                    help="整体移调半音数 (E 大调 = +4), 默认 0 (C 大调)")
+    ap.add_argument("--out", default=OUT, help="输出目录")
+    args = ap.parse_args()
+    transpose = args.transpose
+    out_dir = args.out
+
     with open(SRC, 'r', encoding='utf-8') as f:
         lines = f.readlines()
 
@@ -156,16 +165,26 @@ def main():
 
     print(f"Right hand: {len(right_events)} notes, Left hand: {len(left_events)} notes")
 
+    # 整体移调 (E 大调 GT = +4 半音, 主旋律线条不变)
+    if transpose:
+        right_events = [(o, f, p + transpose) for o, f, p in right_events]
+        left_events = [(o, f, p + transpose) for o, f, p in left_events]
+        print(f"Transposed +{transpose} semitones")
+
     # ---- MIDI output ----
+    # 2026-08-02 修复: 左右手分到不同 instrument (通道).
+    # 之前混在同一通道, pretty_midi 写盘时重叠同音高音符被 note-on 重触发截断
+    # (右手长音被左手同音高短音吃掉尾段, 34 处与 txt 不一致, 播放听感也受影响).
     pm = pretty_midi.PrettyMIDI(initial_tempo=bpm)
     pm.time_signature_changes.append(pretty_midi.TimeSignature(4, 4, 0.0))
-    inst = pretty_midi.Instrument(program=0, name="Piano")
-    for onset, offset, pitch in right_events + left_events:
-        inst.notes.append(pretty_midi.Note(velocity=80, pitch=pitch, start=onset, end=offset))
-    pm.instruments.append(inst)
+    for name, events in [("Right", right_events), ("Left", left_events)]:
+        inst = pretty_midi.Instrument(program=0, name=name)
+        for onset, offset, pitch in events:
+            inst.notes.append(pretty_midi.Note(velocity=80, pitch=pitch, start=onset, end=offset))
+        pm.instruments.append(inst)
 
-    os.makedirs(OUT, exist_ok=True)
-    midi_path = os.path.join(OUT, "himawari_reference.mid")
+    os.makedirs(out_dir, exist_ok=True)
+    midi_path = os.path.join(out_dir, "himawari_reference.mid")
     pm.write(midi_path)
     print(f"MIDI: {midi_path}")
 
@@ -342,7 +361,7 @@ def main():
         xml
     )
 
-    xml_path = os.path.join(OUT, "himawari_reference.musicxml")
+    xml_path = os.path.join(out_dir, "himawari_reference.musicxml")
     with open(xml_path, "w", encoding="utf-8") as f:
         f.write(xml)
     os.unlink(tmp_xml)
