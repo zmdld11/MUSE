@@ -18,7 +18,10 @@ def _load_model():
     if _model is not None:
         return _model
 
-    model_path = os.path.join(config.WORKSPACE_DIR, "model", "VER2.0_Bootstrap.pth")
+    model_path = os.environ.get(
+        "MUSE_MODEL_PATH",
+        os.path.join(config.WORKSPACE_DIR, "model", "VER2.0_Bootstrap.pth"),
+    )
     if not os.path.exists(model_path):
         logger.warning(f"No trained model at {model_path}, falling back to basic-pitch")
         return None
