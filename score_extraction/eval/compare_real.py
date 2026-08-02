@@ -92,14 +92,98 @@ def analyze(est_notes, gt_notes):
     }
 
 
+def estimate_shift_curve(gt_notes, est_notes, seg=20.0, t_tol=0.15, p_tol=2):
+    """分段扫描最优常数偏移 → 返回 shift_at(t) 分段线性插值函数.
+
+    2026-08-02 诊断: GT 是理想网格, 录音有 ~0.75s 前奏 + 演奏速度轻微漂移.
+    逐段 (默认 20s) 扫描使同音高匹配数最大的偏移, 段间线性插值.
+    """
+    gt_arr = np.array([[n["onset"], n["pitch"]] for n in gt_notes])
+    est_arr = np.array([[n["onset"], n["pitch"]] for n in est_notes])
+    t_max = gt_arr[:, 0].max()
+
+    shifts = []
+    for t0 in range(0, int(t_max), int(seg)):
+        seg_gt = gt_arr[(gt_arr[:, 0] >= t0) & (gt_arr[:, 0] < t0 + seg)]
+        if len(seg_gt) == 0:
+            continue
+        best_s, best_c = 0.0, -1
+        for s in np.arange(0.0, 1.6, 0.025):
+            hits = 0
+            for g in seg_gt:
+                mask = np.abs(est_arr[:, 0] - (g[0] + s)) <= t_tol
+                if mask.any() and np.min(np.abs(est_arr[mask, 1] - g[1])) <= p_tol:
+                    hits += 1
+            if hits > best_c:
+                best_c, best_s = hits, s
+        shifts.append((t0, best_s))
+
+    def shift_at(t):
+        if t <= shifts[0][0]:
+            return shifts[0][1]
+        for k in range(len(shifts) - 1):
+            t0, s0 = shifts[k]
+            t1, s1 = shifts[k + 1]
+            if t0 <= t <= t1:
+                return s0 + (s1 - s0) * (t - t0) / (t1 - t0)
+        return shifts[-1][1]
+
+    return shift_at, shifts
+
+
+def aligned_analyze(gt_notes, est_notes, shift_at=None, t_tol=0.15, p_tol=2):
+    """偏移校正后的四分类 (2026-08-02).
+
+    每个 GT 音符用 shift_at 校正时间后, 在 est 中找 ±t_tol 内音高差 ≤p_tol 的音符,
+    一次匹配不重复使用 est 音符 (容忍碎音化). 返回与 analyze() 同结构 dict.
+    """
+    from collections import defaultdict
+    est_arr = np.array([[n["onset"], n["offset"], n["pitch"]] for n in est_notes])
+    gt_arr = np.array([[n["onset"], n["offset"], n["pitch"]] for n in gt_notes])
+
+    used = set()
+    tp = 0
+    onset_diffs = []
+    for gi, g in enumerate(gt_notes):
+        t = g["onset"] + (shift_at(g["onset"]) if shift_at else 0.0)
+        mask = np.abs(est_arr[:, 0] - t) <= t_tol
+        if mask.any():
+            cands = [j for j in np.where(mask)[0]
+                     if j not in used and abs(est_arr[j, 2] - g["pitch"]) <= p_tol]
+            if cands:
+                j = min(cands, key=lambda j: abs(est_arr[j, 2] - g["pitch"]))
+                used.add(j)
+                tp += 1
+                onset_diffs.append(abs(est_arr[j, 0] - t))
+
+    # 按音区命中: GT 音符在 ±t_tol 内有同音高 est 候选 (统计用, 不消耗 used)
+    by_region = defaultdict(lambda: {"gt": 0, "hit": 0})
+    for gi, g in enumerate(gt_notes):
+        t = g["onset"] + (shift_at(g["onset"]) if shift_at else 0.0)
+        region = "low" if g["pitch"] < 55 else ("mid" if g["pitch"] < 72 else "high")
+        by_region[region]["gt"] += 1
+        mask = np.abs(est_arr[:, 0] - t) <= t_tol
+        if mask.any() and np.min(np.abs(est_arr[mask, 2] - g["pitch"])) <= p_tol:
+            by_region[region]["hit"] += 1
+
+    onset_diffs = np.array(onset_diffs) if onset_diffs else np.array([0.0])
+    return {
+        "tp": tp, "miss": len(gt_notes) - tp,
+        "fp": len(est_notes) - tp,
+        "n_gt": len(gt_notes), "n_est": len(est_notes),
+        "onset_diffs": onset_diffs,
+        "by_region": dict(by_region),
+    }
+
+
 def main():
     import argparse
     ap = argparse.ArgumentParser(description="真实录音对比 (管线输出 vs 手工参考 MIDI)")
     ap.add_argument("--gt", choices=["c", "e"], default="e",
                     help="参考调性: e=E大调(默认, 与录音匹配) / c=C大调(原谱)")
-    ap.add_argument("--shift", type=float, default=0.15,
-                    help="est 时间轴校正 (秒): 模型 onset 相对 GT 的固定延迟. "
-                         "2026-08-02 诊断: 夜の向日葵 最优 ~0.15s")
+    ap.add_argument("--shift", type=float, default=None,
+                    help="固定时间轴校正 (秒). 默认自动分段扫描 (2026-08-02: "
+                         "录音 ~0.75s 前奏 + 演奏漂移, 固定值不准)")
     args = ap.parse_args()
 
     est_path = os.path.join(os.path.dirname(__file__), "..", "output",
@@ -111,16 +195,17 @@ def main():
     est = load_notes(est_path)
     gt = load_notes(gt_path)
 
-    # 时间轴校正: 模型 onset 相对 GT 有固定延迟 (2026-08-02 诊断 ~0.15s)
-    if args.shift:
-        for n in est:
-            n["onset"] -= args.shift
-            n["offset"] -= args.shift
-        est = [n for n in est if n["onset"] >= 0]
+    # 时间轴校正: 默认自动分段扫描最优偏移
+    if args.shift is not None:
+        shift_at, shifts = (lambda s: (lambda t: s, [(0.0, s)]))(args.shift)
+        shift_desc = f"固定 {args.shift}s"
+    else:
+        shift_at, shifts = estimate_shift_curve(gt, est)
+        shift_desc = "自动分段 " + " ".join(f"{s:+.2f}" for _, s in shifts)
 
-    print(f"我们的: {len(est)} 音符 (shift={args.shift}s)   对照组: {len(gt)} 音符")
+    print(f"我们的: {len(est)} 音符   对照组: {len(gt)} 音符   时间轴校正: {shift_desc}")
 
-    r = analyze(est, gt)
+    r = aligned_analyze(gt, est, shift_at)
 
     # 窗口覆盖 recall: GT 音符期间 (onset..offset) 内被同音高 est 覆盖 (容忍碎音化)
     win_covered = 0
@@ -134,7 +219,7 @@ def main():
     import statistics
     n_per_gt = np.array(n_per_gt)
 
-    print(f"\n=== 真实录音对比 (夜の向日葵, E大调 GT, shift={args.shift}s) ===")
+    print(f"\n=== 真实录音对比 (夜の向日葵, E大调 GT, shift={shift_desc}) ===")
     print(f"拾音正确率:")
     print(f"  GT 被检出 (recall) : {r['tp']}/{r['n_gt']} ({r['tp']/r['n_gt']*100:.1f}%)")
     print(f"  漏检               : {r['miss']} ({r['miss']/r['n_gt']*100:.1f}%)")
