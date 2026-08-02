@@ -109,7 +109,14 @@ def _process_instrument(audio_path: str, inst_name: str, bpm: float,
 
     # Layer 4: Note-level post-processing
     logger.info(f"  [{inst_name}] Layer 4: Note post-processing...")
-    notes = refine_notes(candidates, audio, model_sr, model_hop)
+    # VER2.3: BP 后处理候选直接转秒 (跳过谐波/调性过滤 — A/B 证明它们砍 50% 真音符)
+    notes = [{
+        "onset": round(c.get("onset_time", c["onset_frame"] * model_hop / model_sr), 4),
+        "offset": round(c.get("offset_time", c["offset_frame"] * model_hop / model_sr), 4),
+        "pitch": c["pitch"],
+        "confidence": c["confidence"],
+        "amplitude": 0.1,
+    } for c in candidates]
     if len(notes) == 0:
         logger.warning(f"  [{inst_name}] No notes after refinement")
         return False
