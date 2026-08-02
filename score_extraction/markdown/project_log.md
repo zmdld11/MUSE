@@ -608,3 +608,23 @@ E 大调 GT 对齐后 recall 依然只有 5.1% → 调性不是主因！诊断�
 5. 短音过滤无效 (碎音中位数时值 0.70s, 是完整形态的弱音)
 
 **待办**: 听感验证 piano_stabilized.mid; 固化到 pipeline (piano 用钢琴轨 + wiener + conf 过滤); 更稳的降噪 (spectral gating 替代 wiener NaN 问题)
+
+### 7. 膝跳反射回声定位 + VER2.4 管线固化 (F1 0.56→0.65)
+
+**现象**: 用户听感 — 主音响完约 16 分音符后, 一个比主音低、像"中央C左边B"(B3≈59) 的音弹一下
+
+**定位**: 不是同音高回声 (谱面有 33% 快速重复音, 时间-音高模式规则全部误伤, recall 大出血 45%), 而是:
+- 低 onset_prob (<0.15) 候选 771 个中 GT 真音符仅 30.7%; onset_prob>0.8 的 88.3% 是真音符 — **无真实击键的弱音 = 回声伪音符** (melodia_trick 捡起的衰减尾巴/共鸣)
+- B 音系列碎音偏多 (B1/B2/B3/B4 共 155 个), 用户听到的 B3 是共鸣最响的频率
+- 碎音音级分布 = GT 音级分布 (E 大调) → 音乐上有意义, 无脑过滤会砍真内容
+
+**规则**: 删 (onset_prob<0.15 且 confidence<0.5) → 1492→968 音符, recall 78.1→70.1%, precision 44.1→61.1%, **F1 0.56→0.65**
+
+**VER2.4 管线固化** (src/pipeline.py + src/frame_post.py):
+1. piano 轨改用钢琴轨 + wiener 降噪 (原音频串扰 + demucs 雪花, F1 0.46→0.63)
+2. process_frames_bp 候选增加 onset_prob 字段 (onset 时刻窗口峰值)
+3. Layer 4 膝跳回声过滤 (onset_prob<0.15 且 conf<0.5)
+4. 修路径 bug: _process_instrument 输出目录改用歌曲目录 (钢琴轨降噪临时文件名会污染派生目录)
+- 端到端验证: 真实录音 pipeline 跑通, piano 914 音符, MIDI/XML 输出正确
+
+**工具**: eval/piano_roll.py — 卷帘 PNG + 音符 CSV (人工核对) + CSV 修正后 rebuild 重生成 MIDI
