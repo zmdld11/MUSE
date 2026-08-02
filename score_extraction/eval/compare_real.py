@@ -6,7 +6,9 @@
   3. 节奏正确率: 匹配上的音符中 onset 偏差分布 (≤50ms/≤100ms/≤200ms)
   4. 按音区拆分: 低/中/高音区的表现
 
-用法: python -m eval.compare_real
+用法: python -m eval.compare_real [--gt <gt.mid>] [--est <est.mid>]
+  --gt  手工参考 MIDI 路径 (默认 himawari_reference C大调)
+        调性不匹配时用 --gt output/himawari_reference_E/himawari_reference_E.mid
 """
 import logging
 import os
@@ -91,18 +93,48 @@ def analyze(est_notes, gt_notes):
 
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser(description="真实录音对比 (管线输出 vs 手工参考 MIDI)")
+    ap.add_argument("--gt", choices=["c", "e"], default="e",
+                    help="参考调性: e=E大调(默认, 与录音匹配) / c=C大调(原谱)")
+    ap.add_argument("--shift", type=float, default=0.15,
+                    help="est 时间轴校正 (秒): 模型 onset 相对 GT 的固定延迟. "
+                         "2026-08-02 诊断: 夜の向日葵 最优 ~0.15s")
+    args = ap.parse_args()
+
     est_path = os.path.join(os.path.dirname(__file__), "..", "output",
                             "夜の向日葵 - 松本文紀", "piano.mid")
+    gt_dir = "himawari_reference_E" if args.gt == "e" else "himawari_reference"
     gt_path = os.path.join(os.path.dirname(__file__), "..", "output",
-                           "himawari_reference", "himawari_reference.mid")
+                           gt_dir, "himawari_reference.mid")
 
     est = load_notes(est_path)
     gt = load_notes(gt_path)
-    print(f"我们的: {len(est)} 音符   对照组: {len(gt)} 音符")
+
+    # 时间轴校正: 模型 onset 相对 GT 有固定延迟 (2026-08-02 诊断 ~0.15s)
+    if args.shift:
+        for n in est:
+            n["onset"] -= args.shift
+            n["offset"] -= args.shift
+        est = [n for n in est if n["onset"] >= 0]
+
+    print(f"我们的: {len(est)} 音符 (shift={args.shift}s)   对照组: {len(gt)} 音符")
 
     r = analyze(est, gt)
 
-    print(f"\n=== 真实录音对比 (夜の向日葵) ===")
+    # 窗口覆盖 recall: GT 音符期间 (onset..offset) 内被同音高 est 覆盖 (容忍碎音化)
+    win_covered = 0
+    n_per_gt = []
+    for go, gf, gp in [(n["onset"], n["offset"], n["pitch"]) for n in gt]:
+        cnt = sum(1 for e in est if go - 0.05 <= e["onset"] <= gf + 0.05
+                  and abs(midi_to_hz(e["pitch"]) - midi_to_hz(gp)) <= 50)
+        if cnt:
+            win_covered += 1
+        n_per_gt.append(cnt)
+    import statistics
+    n_per_gt = np.array(n_per_gt)
+
+    print(f"\n=== 真实录音对比 (夜の向日葵, E大调 GT, shift={args.shift}s) ===")
     print(f"拾音正确率:")
     print(f"  GT 被检出 (recall) : {r['tp']}/{r['n_gt']} ({r['tp']/r['n_gt']*100:.1f}%)")
     print(f"  漏检               : {r['miss']} ({r['miss']/r['n_gt']*100:.1f}%)")
@@ -111,6 +143,9 @@ def main():
     recall = r['tp'] / r['n_gt'] if r['n_gt'] else 0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0
     print(f"  → precision={precision:.3f} recall={recall:.3f} note_f1={f1:.3f}")
+    print(f"\n窗口覆盖 recall (容忍碎音化): {win_covered}/{r['n_gt']} ({win_covered/r['n_gt']*100:.1f}%)")
+    print(f"碎音程度: 平均 {n_per_gt.mean():.1f} 个 est 音符/GT音符 (中位 {np.median(n_per_gt):.0f})")
+    print(f"  完全无覆盖 GT 音符: {(n_per_gt==0).sum()} ({(n_per_gt==0).mean()*100:.1f}%)")
 
     print(f"\n节奏正确率 (匹配对 onset 偏差):")
     d = r["onset_diffs"]
