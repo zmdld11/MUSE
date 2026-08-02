@@ -1,0 +1,15 @@
+{
+  "timestamp": "20260802-014404",
+  "dataset": "GiantMIDI-PIano (synthetic FluidSynth)",
+  "n_requested": 40,
+  "seed": 42,
+  "results": [
+    {
+      "model": "ours",
+      "error": "all songs failed"
+    }
+  ],
+  "threshold": "adaptive",
+  "threshold_cap": null,
+  "key_filter": "on"
+}

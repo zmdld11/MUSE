@@ -69,9 +69,7 @@ scoremill/
 docs/*
 !docs/**/
 !docs/**/*.md
-汇报/*
-!汇报/**/
-!汇报/**/*.md
+汇报/
 MUSENote/*
 !MUSENote/**/
 !MUSENote/**/*.md

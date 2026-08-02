@@ -1,0 +1,96 @@
+{
+  "timestamp": "20260802-094625",
+  "dataset": "GiantMIDI-PIano (synthetic FluidSynth)",
+  "n_requested": 5,
+  "seed": 42,
+  "results": [
+    {
+      "model": "basic",
+      "n_songs": 5,
+      "frame_f1": 0.9804144385026736,
+      "frame_precision": 0.9804144385026736,
+      "frame_recall": 0.9804144385026736,
+      "note_f1": 0.2637882368521277,
+      "note_precision": 0.3549739512859946,
+      "note_recall": 0.2101004996849872,
+      "offset_f1": 0.05821599372553114,
+      "offset_precision": 0.0780252953977705,
+      "offset_recall": 0.04646310291739654,
+      "per_song": [
+        {
+          "frame_precision": 0.9879239375175908,
+          "frame_recall": 0.9879239375175908,
+          "frame_f1": 0.9879239375175908,
+          "note_precision": 0.35,
+          "note_recall": 0.22105263157894736,
+          "note_f1": 0.27096774193548384,
+          "offset_precision": 0.03333333333333333,
+          "offset_recall": 0.021052631578947368,
+          "offset_f1": 0.025806451612903222,
+          "name": "Lange, Gustav, Aus des Lebens Mai, Op.292, G8ULJn55A7Y.mid",
+          "n_gt_notes": 95,
+          "n_est_notes": 60
+        },
+        {
+          "frame_precision": 0.9800256825218125,
+          "frame_recall": 0.9800256825218125,
+          "frame_f1": 0.9800256825218125,
+          "note_precision": 0.33505154639175255,
+          "note_recall": 0.18005540166204986,
+          "note_f1": 0.23423423423423423,
+          "offset_precision": 0.05154639175257732,
+          "offset_recall": 0.027700831024930747,
+          "offset_f1": 0.036036036036036036,
+          "name": "Scarlatti, Domenico, Keyboard Sonata in F major, K.445, aonverKMWfQ.mid",
+          "n_gt_notes": 361,
+          "n_est_notes": 194
+        },
+        {
+          "frame_precision": 0.9772551365043625,
+          "frame_recall": 0.9772551365043625,
+          "frame_f1": 0.9772551365043625,
+          "note_precision": 0.4819277108433735,
+          "note_recall": 0.27972027972027974,
+          "note_f1": 0.35398230088495575,
+          "offset_precision": 0.07228915662650602,
+          "offset_recall": 0.04195804195804196,
+          "offset_f1": 0.053097345132743355,
+          "name": "Rebikov, Vladimir, À la brume, Op.23, TXz5ukS8koM.mid",
+          "n_gt_notes": 143,
+          "n_est_notes": 83
+        },
+        {
+          "frame_precision": 0.9778796087813115,
+          "frame_recall": 0.9778796087813115,
+          "frame_f1": 0.9778796087813115,
+          "note_precision": 0.46296296296296297,
+          "note_recall": 0.2819548872180451,
+          "note_f1": 0.35046728971962615,
+          "offset_precision": 0.16049382716049382,
+          "offset_recall": 0.09774436090225563,
+          "offset_f1": 0.12149532710280374,
+          "name": "Satie, Erik, Préludes flasques (pour un chien), VTzsmbDNDaQ.mid",
+          "n_gt_notes": 266,
+          "n_est_notes": 162
+        },
+        {
+          "frame_precision": 0.9789878271882916,
+          "frame_recall": 0.9789878271882916,
+          "frame_f1": 0.9789878271882916,
+          "note_precision": 0.14492753623188406,
+          "note_recall": 0.08771929824561403,
+          "note_f1": 0.1092896174863388,
+          "offset_precision": 0.07246376811594203,
+          "offset_recall": 0.043859649122807015,
+          "offset_f1": 0.0546448087431694,
+          "name": "Severo, Marcello, Piano Sonata No.1, Op.9, EUyfmw-4V7k.mid",
+          "n_gt_notes": 114,
+          "n_est_notes": 69
+        }
+      ]
+    }
+  ],
+  "threshold": "adaptive",
+  "threshold_cap": null,
+  "key_filter": "on"
+}
