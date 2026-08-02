@@ -81,8 +81,10 @@ def _write_pretty_midi(notes: list[dict], midi_path: str, bpm: float,
 
 
 def _process_instrument(audio_path: str, inst_name: str, bpm: float,
+                        output_dir: str,
                         chords: list[dict] | None = None) -> bool:
     """Run Layers 2-5 on one instrument track. Returns True on success."""
+    # 输出目录用歌曲目录 (VER2.4: 钢琴轨传入降噪临时文件, 不能用文件名派生目录)
     # Layer 2: Transcription
     logger.info(f"  [{inst_name}] Layer 2: Transcribing...")
     result = transcribe(audio_path)
@@ -110,13 +112,16 @@ def _process_instrument(audio_path: str, inst_name: str, bpm: float,
     # Layer 4: Note-level post-processing
     logger.info(f"  [{inst_name}] Layer 4: Note post-processing...")
     # VER2.3: BP 后处理候选直接转秒 (跳过谐波/调性过滤 — A/B 证明它们砍 50% 真音符)
+    # VER2.4: 膝跳回声过滤 — 删 (onset_prob<0.15 且 confidence<0.5): 无真实击键的弱音
+    # (melodia_trick 捡起的衰减尾巴/共鸣回声, 真实录音 F1 0.56→0.65)
     notes = [{
         "onset": round(c.get("onset_time", c["onset_frame"] * model_hop / model_sr), 4),
         "offset": round(c.get("offset_time", c["offset_frame"] * model_hop / model_sr), 4),
         "pitch": c["pitch"],
         "confidence": c["confidence"],
         "amplitude": 0.1,
-    } for c in candidates]
+    } for c in candidates
+        if not (c.get("onset_prob", 1.0) < 0.15 and c["confidence"] < 0.5)]
     if len(notes) == 0:
         logger.warning(f"  [{inst_name}] No notes after refinement")
         return False
@@ -141,11 +146,7 @@ def _process_instrument(audio_path: str, inst_name: str, bpm: float,
     )
 
     # Layer 5d: Export — MIDI → MuseScore CLI (primary), export_score fallback
-    output_stem = os.path.join(
-        config.OUTPUT_DIR,
-        os.path.basename(audio_path).rsplit(".", 1)[0],
-        inst_name,
-    )
+    output_stem = os.path.join(output_dir, inst_name)
     os.makedirs(os.path.dirname(output_stem), exist_ok=True)
 
     midi_path = output_stem + ".mid"
@@ -235,10 +236,21 @@ def run_pipeline(audio_path: str, output_dir: str | None = None) -> str:
             all_notes[inst_name] = []
             continue
 
-        # Piano: use original audio for transcription (basic-pitch works better)
-        src_audio = audio_path if inst_name == "piano" else wav_path
+        # Piano: VER2.4 (2026-08-02) — 用钢琴轨而非原音频, 并 wiener 降噪.
+        # A/B 证明: 原音频有鼓/贝斯/人声串扰, 分离钢琴轨的 demucs 雪花会抖模型输入;
+        # 钢琴轨+wiener 真实录音 F1 0.46→0.63 (弱音过滤组合后 0.65).
+        if inst_name == "piano":
+            from scipy.signal import wiener
+            import scipy.io.wavfile as _wf
+            audio, _sr = librosa.load(wav_path, sr=config.SR, mono=True)
+            audio_wn = np.nan_to_num(wiener(audio, mysize=9))
+            src_audio = os.path.join(output_dir, "piano_denoised.wav")
+            _wf.write(src_audio, config.SR,
+                      (audio_wn * 32767).clip(-32768, 32767).astype(np.int16))
+        else:
+            src_audio = wav_path
         try:
-            _process_instrument(src_audio, inst_name, bpm)
+            _process_instrument(src_audio, inst_name, bpm, output_dir)
         except Exception as exc:
             logger.error(f"  [{inst_name}] Pipeline crashed: {exc}", exc_info=True)
 

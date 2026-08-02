@@ -294,16 +294,27 @@ def process_frames_bp(onset_probs: np.ndarray, frame_probs: np.ndarray,
     else:
         times_s = np.arange(n_frames_total) * hop_length / sr
 
+    # onset_prob: 候选 onset 时刻窗口内的 onset 峰值 (VER2.4 膝跳回声过滤用.
+    # 真实录音上 melodia_trick 捡起的音符无真实击键 → onset_prob 极低.
+    # 注意: 用原始 onset_probs 而非 infer 后的, 反映真实击键强度.)
+    raw_onsets = onset_probs.astype(np.float64)
+
     candidates = []
     for start_idx, end_idx, pitch_midi, amplitude in note_events:
+        freq_idx = int(pitch_midi) - 21
+        win_start = max(0, int(start_idx) - 1)
+        win_end = min(raw_onsets.shape[0], int(start_idx) + 2)
+        onset_prob = float(raw_onsets[win_start:win_end, freq_idx].max()) \
+            if freq_idx < raw_onsets.shape[1] else 0.0
         candidates.append({
             "onset_frame": int(start_idx),
             "offset_frame": int(end_idx),
             "onset_time": float(times_s[int(start_idx)]),
             "offset_time": float(times_s[min(int(end_idx), n_frames_total - 1)]),
             "pitch": int(pitch_midi),
-            "pitch_bin": int(pitch_midi) - 21,
+            "pitch_bin": freq_idx,
             "confidence": float(amplitude),
+            "onset_prob": onset_prob,
         })
     logger.info(f"  BP decode: {len(candidates)} candidates")
     return candidates
