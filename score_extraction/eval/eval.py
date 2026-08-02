@@ -69,8 +69,14 @@ def _transcribe_basic(audio: np.ndarray, tmp_path: str) -> dict:
 def _postprocess(result: dict, audio: np.ndarray,
                  binarize_threshold: float = None,
                  key_filter: bool = True,
-                 threshold_cap: float = None) -> tuple:
-    """帧/音符级后处理, 返回 (est_frame_probs, est_notes)."""
+                 threshold_cap: float = None,
+                 binarize_mode: str = "adaptive") -> tuple:
+    """帧/音符级后处理, 返回 (est_frame_probs, est_notes).
+
+    VER2.3: 默认 (BP 后处理) 不再跑 note_post 的谐波/调性过滤 —
+    官方后处理无此步骤, A/B 证明 note_post 把 135 候选砍到 60 (note_f1 0.70→0.27).
+    legacy 模式保留原链路.
+    """
     from src.frame_post import process_frames
     from src.note_post import refine_notes
 
@@ -82,15 +88,27 @@ def _postprocess(result: dict, audio: np.ndarray,
         hop_length=hop, sr=sr,
         binarize_threshold=binarize_threshold,
         threshold_cap=threshold_cap,
+        binarize_mode=binarize_mode,
     )
-    notes = refine_notes(candidates, audio, sr=sr, hop_length=hop,
-                         key_filter=key_filter)
+    if binarize_mode != "legacy":
+        # BP 后处理: 候选转秒 (带窗口偏移校正), 不过滤 (官方无谐波/调性过滤)
+        notes = [{
+            "onset": round(c.get("onset_time", c["onset_frame"] * hop / sr), 4),
+            "offset": round(c.get("offset_time", c["offset_frame"] * hop / sr), 4),
+            "pitch": c["pitch"],
+            "confidence": c["confidence"],
+            "amplitude": 0.1,
+        } for c in candidates]
+    else:
+        notes = refine_notes(candidates, audio, sr=sr, hop_length=hop,
+                             key_filter=key_filter)
     return result["frame_probs"], notes
 
 
 def run_one(mid_path: str, model_name: str, tmp_path: str,
             use_cache: bool = True, binarize_threshold: float = None,
-            key_filter: bool = True, threshold_cap: float = None) -> dict:
+            key_filter: bool = True, threshold_cap: float = None,
+            binarize_mode: str = "adaptive") -> dict:
     """评测一首曲目, 返回指标 dict."""
     gt = load(mid_path) if use_cache else load(mid_path, force_render=True)
     audio = gt["audio"]
@@ -102,12 +120,15 @@ def run_one(mid_path: str, model_name: str, tmp_path: str,
 
     est_frame_probs, est_notes = _postprocess(
         result, audio, binarize_threshold=binarize_threshold,
-        key_filter=key_filter, threshold_cap=threshold_cap)
+        key_filter=key_filter, threshold_cap=threshold_cap,
+        binarize_mode=binarize_mode)
     hop = result.get("hop_length", HOP.get(model_name, 512))
 
     metrics = evaluate(gt, est_frame_probs, est_notes, hop_length=hop, sr=SR,
                        binarize_threshold=binarize_threshold,
-                       threshold_cap=threshold_cap)
+                       threshold_cap=threshold_cap,
+                       binarize_mode=binarize_mode,
+                       est_onset_probs=result["onset_probs"])
     metrics["name"] = os.path.basename(mid_path)
     metrics["n_gt_notes"] = int(len(gt["intervals"]))
     metrics["n_est_notes"] = int(len(est_notes))
@@ -121,7 +142,8 @@ def run_one(mid_path: str, model_name: str, tmp_path: str,
 def evaluate_model(model_name: str, midis: list[str], out_dir: str,
                    binarize_threshold: float = None,
                    key_filter: bool = True,
-                   threshold_cap: float = None) -> dict:
+                   threshold_cap: float = None,
+                   binarize_mode: str = "adaptive") -> dict:
     """对指定模型跑完整评测, 返回聚合结果."""
     results = []
     tmp_path = os.path.join(out_dir, "_tmp.wav")
@@ -131,7 +153,8 @@ def evaluate_model(model_name: str, midis: list[str], out_dir: str,
             r = run_one(mid, model_name, tmp_path,
                         binarize_threshold=binarize_threshold,
                         key_filter=key_filter,
-                        threshold_cap=threshold_cap)
+                        threshold_cap=threshold_cap,
+                        binarize_mode=binarize_mode)
             logger.info(
                 f"[{i}/{len(midis)}] {r['name'][:40]:42s} "
                 f"frame={r['frame_f1']:.3f} note={r['note_f1']:.3f} "
@@ -171,7 +194,7 @@ def main():
     ap.add_argument("--seed", type=int, default=42, help="采样 seed")
     ap.add_argument("--out-dir", default=None, help="报告输出目录 (默认 eval/reports)")
     ap.add_argument("--threshold", default="adaptive",
-                    help="二值化阈值: adaptive / 0.3 / 0.5 (固定阈值作用于 HMM 平滑后验)")
+                    help="二值化阈值: adaptive / otsu-pitch / otsu-reg / 数值(固定)")
     ap.add_argument("--threshold-cap", type=float, default=None,
                     help="自适应 percentile 的上限 (防止密集乐段阈值≈1.0 杀真音符)")
     ap.add_argument("--key-filter", choices=["on", "off"], default="on",
@@ -200,7 +223,8 @@ def main():
     }
 
     models = ["ours", "basic"] if args.model == "both" else [args.model]
-    binarize_threshold = None if args.threshold == "adaptive" else float(args.threshold)
+    binarize_mode = args.threshold if args.threshold in ("adaptive", "otsu-pitch", "otsu-reg") else "fixed"
+    binarize_threshold = None if binarize_mode != "fixed" else float(args.threshold)
     key_filter = args.key_filter == "on"
     for m in models:
         logger.info(f"\n=== 评测模型: {m}  threshold={args.threshold}  "
@@ -208,7 +232,8 @@ def main():
         agg = evaluate_model(m, midis, out_dir,
                              binarize_threshold=binarize_threshold,
                              key_filter=key_filter,
-                             threshold_cap=args.threshold_cap)
+                             threshold_cap=args.threshold_cap,
+                             binarize_mode=binarize_mode)
         report["results"].append(agg)
     report["threshold"] = args.threshold
     report["threshold_cap"] = args.threshold_cap

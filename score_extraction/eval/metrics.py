@@ -26,27 +26,46 @@ MIDI_OFFSET = 21              # 88 音高矩阵中 MIDI 21 = 第一个 bin
 
 def _binarize_frame_probs(frame_probs: np.ndarray,
                           binarize_threshold: float = None,
-                          threshold_cap: float = None) -> np.ndarray:
-    """用后处理管线的同一套二值化 (HMM 平滑 + 注册自适应阈值).
+                          threshold_cap: float = None,
+                          binarize_mode: str = "adaptive",
+                          onset_probs: np.ndarray = None) -> np.ndarray:
+    """帧级二值化 (VER2.3: 与音符级后处理一致).
 
-    与 src.frame_post 的 process_frames 保持一致, 使帧级指标
-    与音符级指标使用同一套二值化, 两个模型 (自训/basic) 才可比.
+    默认 (adaptive): 用 BP 后处理 (process_frames_bp) 生成音符候选,
+    音符覆盖的帧标记为活跃 — 与音符级指标同一套逻辑.
+    legacy: HMM 平滑 + 自适应阈值 (旧逻辑).
     """
-    from src.frame_post import _hmm_smooth, _adaptive_threshold_per_register
+    from src.frame_post import process_frames_bp, _hmm_smooth, _adaptive_threshold_per_register
+
+    if binarize_mode != "legacy":
+        # 用 BP 后处理 (逐音高 + melodia) 生成候选, 覆盖帧 = 活跃
+        if onset_probs is None:
+            onset_probs = np.zeros_like(frame_probs)
+        cands = process_frames_bp(onset_probs, frame_probs)
+        binary = np.zeros_like(frame_probs, dtype=bool)
+        for c in cands:
+            s, e, b = c["onset_frame"], c["offset_frame"], c["pitch_bin"]
+            if 0 <= b < binary.shape[1]:
+                binary[s:min(e, binary.shape[0]), b] = True
+        return binary
+
+    # legacy: HMM + 自适应阈值
     smoothed = _hmm_smooth(frame_probs)
-    if binarize_threshold is None:
-        return _adaptive_threshold_per_register(smoothed, max_threshold=threshold_cap)
-    return _adaptive_threshold_per_register(
-        smoothed, fixed_threshold=float(binarize_threshold))
+    if binarize_threshold is not None:
+        return _adaptive_threshold_per_register(
+            smoothed, fixed_threshold=float(binarize_threshold))
+    return _adaptive_threshold_per_register(smoothed, max_threshold=threshold_cap)
 
 
 def _frame_probs_to_times_freqs(frame_probs: np.ndarray,
                                 hop_length: int, sr: int,
                                 binarize_threshold: float = None,
-                                threshold_cap: float = None) -> tuple:
+                                threshold_cap: float = None,
+                                binarize_mode: str = "adaptive",
+                                onset_probs: np.ndarray = None) -> tuple:
     """把 (T, P) 概率矩阵转成 mir_eval.multipitch 需要的 (times, freqs).
 
-    帧级"活跃"定义 = 后处理管线的二值化输出 (HMM + 自适应阈值).
+    帧级"活跃"定义 = 后处理管线的二值化输出 (默认 BP 后处理).
     times : (T,) 每帧时间戳
     freqs : (T, P) 每帧各音高的频率 (Hz), 无音高处为 NaN
     """
@@ -54,7 +73,8 @@ def _frame_probs_to_times_freqs(frame_probs: np.ndarray,
     times = np.arange(T) * hop_length / sr
 
     active = _binarize_frame_probs(
-        frame_probs, binarize_threshold, threshold_cap).astype(bool)
+        frame_probs, binarize_threshold, threshold_cap, binarize_mode,
+        onset_probs=onset_probs).astype(bool)
     freqs = np.full((T, P), np.nan)
     for t in range(T):
         bins = np.nonzero(active[t])[0]
@@ -109,11 +129,15 @@ def _resample_probs_to_grid(est_frame_probs: np.ndarray,
 def frame_f1(gt_frame_labels: np.ndarray, est_frame_probs: np.ndarray,
              hop_length: int = 512, sr: int = 22050,
              binarize_threshold: float = None,
-             threshold_cap: float = None) -> tuple:
+             threshold_cap: float = None,
+             binarize_mode: str = "adaptive",
+             onset_probs: np.ndarray = None) -> tuple:
     """帧级 F1 (要求两者已在同一 hop 网格上). GT 二值标签, 预测概率矩阵."""
     ref_times, ref_freqs = _frame_labels_to_times_freqs(gt_frame_labels, hop_length, sr)
     est_times, est_freqs = _frame_probs_to_times_freqs(
-        est_frame_probs, hop_length, sr, binarize_threshold, threshold_cap)
+        est_frame_probs, hop_length, sr,
+        binarize_threshold, threshold_cap, binarize_mode,
+        onset_probs=onset_probs)
     try:
         res = mir_eval.multipitch.evaluate(ref_times, ref_freqs, est_times, est_freqs)
         p, r = float(res["Precision"]), float(res["Recall"])
@@ -174,7 +198,9 @@ def note_offset_f1(gt_intervals: np.ndarray, gt_pitches: np.ndarray,
 def evaluate(gt: dict, est_frame_probs: np.ndarray, est_notes: list[dict],
              hop_length: int = 512, sr: int = 22050,
              binarize_threshold: float = None,
-             threshold_cap: float = None) -> dict:
+             threshold_cap: float = None,
+             binarize_mode: str = "adaptive",
+             est_onset_probs: np.ndarray = None) -> dict:
     """对一个样本计算全部三级指标.
 
     Parameters
@@ -184,6 +210,7 @@ def evaluate(gt: dict, est_frame_probs: np.ndarray, est_notes: list[dict],
     est_frame_probs : (T_est, P) 模型输出的帧概率图 (hop = hop_length)
     est_notes : list[dict]  后处理后的音符 (onset/offset/pitch)
     hop_length : est 的 hop_length (与 gt 不同会被重采样到 GT 网格)
+    est_onset_probs : (T_est, P) onset 概率 (BP 后处理找 onset 峰值用)
 
     Returns
     -------
@@ -193,10 +220,16 @@ def evaluate(gt: dict, est_frame_probs: np.ndarray, est_notes: list[dict],
     n_ref_frames = gt["frame_labels"].shape[0]
     est_on_gt_grid = _resample_probs_to_grid(
         est_frame_probs, est_hop=hop_length, n_ref_frames=n_ref_frames)
+    onset_on_gt_grid = None
+    if est_onset_probs is not None:
+        onset_on_gt_grid = _resample_probs_to_grid(
+            est_onset_probs, est_hop=hop_length, n_ref_frames=n_ref_frames)
     fp, fr, ff = frame_f1(gt["frame_labels"], est_on_gt_grid,
                           hop_length=512, sr=sr,
                           binarize_threshold=binarize_threshold,
-                          threshold_cap=threshold_cap)
+                          threshold_cap=threshold_cap,
+                          binarize_mode=binarize_mode,
+                          onset_probs=onset_on_gt_grid)
     np_, nr, nf = note_f1(gt["intervals"], gt["pitches"], est_notes)
     op, or_, of = note_offset_f1(gt["intervals"], gt["pitches"], est_notes)
     return {

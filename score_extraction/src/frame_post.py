@@ -234,6 +234,81 @@ def _verify_onsets(candidates: list[dict], onset_probs: np.ndarray,
     return verified
 
 
+def process_frames_bp(onset_probs: np.ndarray, frame_probs: np.ndarray,
+                      hop_length: int = None, sr: int = None,
+                      onset_thresh: float = 0.4, frame_thresh: float = 0.2,
+                      min_note_len: int = None, energy_tol: int = None,
+                      melodia_trick: bool = True) -> list[dict]:
+    """basic-pitch 官方后处理 (VER2.3, 2026-08-02).
+
+    移植 basic_pitch.note_creation.output_to_notes_polyphonic:
+      1. 逐音高 argrelmax 找 onset 峰值 (无 2D 连通域)
+      2. 从 onset 向下扩展直到帧能量 < frame_thresh
+      3. melodia_trick: 扫描剩余能量最高帧向前后扩展 — 找回无 onset 峰值的音符
+
+    A/B 证明: basic-pitch 官方后处理 note_f1=0.691 vs 我们旧后处理 0.311 (+122%).
+    我们的旧后处理 (自适应阈值≈1.0 + 连通域 + 调性过滤) 从入口杀 60% 音符.
+
+    参数按 hop 比例调整: basic-pitch 的 min_note_len=11/energy_tol=11 是 hop=256 下,
+    hop=512 时减半 (11 * 256/512 ≈ 5-6).
+    """
+    from basic_pitch.note_creation import (
+        output_to_notes_polyphonic,
+        get_infered_onsets,
+    )
+
+    hop_length = hop_length or config.HOP_LENGTH
+    sr = sr or config.SR
+    if min_note_len is None:
+        min_note_len = max(2, int(11 * 256 / hop_length))
+    if energy_tol is None:
+        energy_tol = max(2, int(11 * 256 / hop_length))
+
+    logger.info(f"Frame post-processing (BP-style): {frame_probs.shape}, "
+                f"min_note_len={min_note_len}, energy_tol={energy_tol}")
+
+    onsets = onset_probs.astype(np.float64)
+    frames = frame_probs.astype(np.float64)
+
+    # infer_onsets: 帧能量跳变补充 onset (basic-pitch 默认 True)
+    onsets = get_infered_onsets(onsets, frames)
+
+    note_events = output_to_notes_polyphonic(
+        frames, onsets,
+        onset_thresh=onset_thresh,
+        frame_thresh=frame_thresh,
+        min_note_len=min_note_len,
+        infer_onsets=False,          # 已在上面手动调用
+        max_freq=None, min_freq=None,
+        melodia_trick=melodia_trick,
+        energy_tol=energy_tol,
+    )
+
+    # 时间轴:
+    #   hop=256 (basic-pitch): 滑窗推理, 需窗口偏移校正 (官方 model_frames_to_time)
+    #   hop=512 (自训模型):   无滑窗, 直接 frame*hop/sr
+    n_frames_total = frames.shape[0]
+    if hop_length == 256:
+        from basic_pitch.note_creation import model_frames_to_time
+        times_s = model_frames_to_time(n_frames_total)
+    else:
+        times_s = np.arange(n_frames_total) * hop_length / sr
+
+    candidates = []
+    for start_idx, end_idx, pitch_midi, amplitude in note_events:
+        candidates.append({
+            "onset_frame": int(start_idx),
+            "offset_frame": int(end_idx),
+            "onset_time": float(times_s[int(start_idx)]),
+            "offset_time": float(times_s[min(int(end_idx), n_frames_total - 1)]),
+            "pitch": int(pitch_midi),
+            "pitch_bin": int(pitch_midi) - 21,
+            "confidence": float(amplitude),
+        })
+    logger.info(f"  BP decode: {len(candidates)} candidates")
+    return candidates
+
+
 def process_frames(onset_probs: np.ndarray, frame_probs: np.ndarray,
                    hop_length: int = None, sr: int = None,
                    binarize_threshold: float = None,
@@ -242,32 +317,37 @@ def process_frames(onset_probs: np.ndarray, frame_probs: np.ndarray,
     """
     Full frame-level post-processing pipeline.
 
+    VER2.3 (2026-08-02): 默认改用 basic-pitch 官方后处理 (process_frames_bp),
+    因为 A/B 证明旧后处理 (自适应阈值+连通域) 从入口杀 60% 音符 (note_f1 0.31 vs 0.69).
+    旧逻辑 (HMM + 阈值 + 连通域 + 验证) 保留为 binarize_mode="legacy" 供参考.
+
     Args:
         onset_probs:  (T, 88)  onset probabilities
         frame_probs:  (T, 88)  frame (note presence) probabilities
-        binarize_threshold: None = 自适应 percentile（默认）;
-                            float = 固定阈值直接作用于 HMM 平滑后验（A/B 用）
-        threshold_cap: 自适应 percentile 的上限（防止密集乐段阈值被顶到 ~1.0）
+        binarize_threshold: 旧逻辑专用: None = 自适应 percentile; float = 固定阈值
+        threshold_cap: 旧逻辑专用: 自适应 percentile 上限
+        binarize_mode: "adaptive"(默认, 新BP逻辑) / "legacy" / "otsu-*"(回退BP)
 
     Returns:
         List of candidate note dicts with keys:
         onset_frame, offset_frame, pitch, pitch_bin, confidence
     """
+    # VER2.3: 默认走 basic-pitch 官方后处理
+    if binarize_mode != "legacy":
+        return process_frames_bp(onset_probs, frame_probs, hop_length, sr)
+
+    # ===== 旧逻辑 (legacy, 保留参考) =====
     hop_length = hop_length or config.HOP_LENGTH
     sr = sr or config.SR
 
-    logger.info(f"Frame post-processing: input shape {frame_probs.shape}")
+    logger.info(f"Frame post-processing (legacy): input shape {frame_probs.shape}")
 
     # Step 1: HMM smoothing
     smoothed = _hmm_smooth(frame_probs)
     logger.info(f"  HMM smoothed: mean={smoothed.mean():.3f}")
 
     # Step 2-3: Adaptive threshold + binarize
-    # binarize_mode: "adaptive"/"fixed" 走阈值分叉, "otsu-*" 暂无实现(实验无效)
-    if binarize_mode.startswith("otsu"):
-        # Otsu 变体在 2026-08-01 A/B 中无效 (note_f1=0.212-0.235), 回退 adaptive
-        binary = _adaptive_threshold_per_register(smoothed, max_threshold=threshold_cap)
-    elif binarize_threshold is None:
+    if binarize_threshold is None:
         binary = _adaptive_threshold_per_register(smoothed, max_threshold=threshold_cap)
     else:
         binary = _adaptive_threshold_per_register(
