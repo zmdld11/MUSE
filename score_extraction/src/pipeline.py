@@ -230,10 +230,15 @@ def run_pipeline(audio_path: str, output_dir: str | None = None) -> str:
     tracks = separate_tracks(audio_path, output_dir)
 
     # Step 3-5: Process each track
+    # 2026-08-02: ONLY_PIANO 时只转录 piano (VER2.4 需分离钢琴轨做 wiener 降噪,
+    # 但 bass/guitar/vocals 未适配, 不再生成)
     all_notes = {}
     for inst_name, wav_path in tracks.items():
         if inst_name == "drums":
             all_notes[inst_name] = []
+            continue
+        if config.ONLY_PIANO and inst_name != "piano":
+            logger.info(f"  [ONLY_PIANO] 跳过 {inst_name} (未适配)")
             continue
 
         # Piano: VER2.4 (2026-08-02) — 用钢琴轨而非原音频, 并 wiener 降噪.

@@ -21,6 +21,9 @@ class Config:
         self.SLIDE_PITCH_THRESHOLD = 0.5
         self.SLIDE_MAX_INTERVAL = 5
         self.MUSESCORE_PATH = r"C:\Program Files\MuseScore 4\bin\MuseScore4.exe"
+        # 2026-08-02: 钢琴曲只转录 piano (跳过 bass/guitar/vocals 等不适配轨道,
+        # 也跳过 source separation — piano 直接用原始音频)
+        self.ONLY_PIANO = True
         os.makedirs(self.OUTPUT_DIR, exist_ok=True)
         os.makedirs(self.MODEL_DIR, exist_ok=True)
 
