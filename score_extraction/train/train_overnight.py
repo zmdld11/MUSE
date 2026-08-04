@@ -109,6 +109,11 @@ def main():
     ap.add_argument("--val-size", type=int, default=50)
     ap.add_argument("--save", default="VER2.2_BootstrapFull")
     ap.add_argument("--resume", default=None, help="从 latest.pt 续训")
+    # VER3.0 混合训练 (2026-08-04): GiantMIDI 合成 + MAESTRO 真实 1:1
+    ap.add_argument("--mix", action="store_true", default=True,
+                    help="混合训练 (默认开, 加 --no-mix 关闭)")
+    ap.add_argument("--n-maestro", type=int, default=None,
+                    help="MAESTRO train 曲目数 (默认全量 962)")
     args = ap.parse_args()
 
     # 脱离终端运行时, 把 stdout/stderr 全部并入日志文件, 避免管道断裂静默死亡
@@ -137,13 +142,29 @@ def main():
     logger.info(f"=== Overnight training: {args.n_files} files x {args.epochs} epochs, "
                 f"batch={args.batch}, lr={args.lr}, device={device} ===")
 
-    train_ds = PianoSynthDataset(max_files=args.n_files, max_dur_sec=MAX_DUR)
-    train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
-                              collate_fn=collate_variable_length)
-    val_ds = PianoSynthDataset(max_files=min(args.val_size, args.n_files // 4), max_dur_sec=MAX_DUR)
-    val_loader = DataLoader(val_ds, batch_size=args.batch, shuffle=False,
-                            collate_fn=collate_variable_length)
-    logger.info(f"Train files: {len(train_ds)}, val files: {len(val_ds)}")
+    if args.mix:
+        # VER3.0 混合训练: 合成+真实 1:1 交替采样, val 用 MAESTRO 官方 validation (真实域)
+        from train.maestro_dataset import MaestroDataset, MixedSynthMaestro
+        synth_ds = PianoSynthDataset(max_files=args.n_files, max_dur_sec=MAX_DUR)
+        real_ds = MaestroDataset(split="train", max_files=args.n_maestro,
+                                 max_dur_sec=MAX_DUR)
+        train_ds = MixedSynthMaestro(synth_ds, real_ds)
+        train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
+                                  collate_fn=collate_variable_length)
+        val_ds = MaestroDataset(split="validation", max_files=args.val_size,
+                                max_dur_sec=MAX_DUR)
+        val_loader = DataLoader(val_ds, batch_size=args.batch, shuffle=False,
+                                collate_fn=collate_variable_length)
+        logger.info(f"Train: synth={len(synth_ds)} 段 + real={len(real_ds)} 段 "
+                    f"→ mixed {len(train_ds)}; Val (MAESTRO real): {len(val_ds)}")
+    else:
+        train_ds = PianoSynthDataset(max_files=args.n_files, max_dur_sec=MAX_DUR)
+        train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
+                                  collate_fn=collate_variable_length)
+        val_ds = PianoSynthDataset(max_files=min(args.val_size, args.n_files // 4), max_dur_sec=MAX_DUR)
+        val_loader = DataLoader(val_ds, batch_size=args.batch, shuffle=False,
+                                collate_fn=collate_variable_length)
+        logger.info(f"Train files: {len(train_ds)}, val files: {len(val_ds)}")
 
     best_val = float("inf")
     if start_epoch > 0 and os.path.exists(best_path):
