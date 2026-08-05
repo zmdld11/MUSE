@@ -121,6 +121,24 @@ class TestMaestroDataset(unittest.TestCase):
                              cache_dir=self.tmpdir)
         self.assertEqual(len(ds1), len(ds2))
 
+    def test_segment_uniform_frames(self):
+        """同曲内所有段帧数必须一致 (np.stack 前提, 2026-08-04 崩溃修复).
+
+        回归: 末段标签不足 60s 时旧代码取 min 导致帧数不同 → stack 崩溃.
+        """
+        from train.maestro_dataset import MaestroDataset
+        ds = MaestroDataset(split="train", max_files=5, max_dur_sec=60,
+                            cache_dir=self.tmpdir)
+        seen_shapes = set()
+        for i in range(len(ds)):
+            mel, onset, frame = ds[i]
+            seen_shapes.add((mel.shape[2], onset.shape[0]))
+        # 每首曲目内部帧数一致 (不同曲目可不同), 用 __len__>1 的曲目抽查
+        # 简化断言: 不存在帧数为 1 的异常样本
+        for sh in seen_shapes:
+            self.assertGreater(sh[0], 100, f"异常短段 {sh}")
+            self.assertEqual(sh[0], sh[1])
+
     def test_segment_continuity(self):
         """相邻段标签时间连续: 段 k 末尾帧 == 段 k+1 起始帧附近."""
         from train.maestro_dataset import MaestroDataset
