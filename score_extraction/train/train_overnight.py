@@ -28,6 +28,7 @@ os.environ.setdefault("TEMP", _TMP)
 
 import torch
 import torch.optim as optim
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -60,7 +61,20 @@ def compute_metrics(pred, target):
     return frame_acc, onset_f1.item()
 
 
-def train_one_epoch(model, dataloader, optimizer, device):
+def dilate_onsets(ot, radius=1):
+    """把单帧 onset 标签膨胀为 ±radius 帧软目标 (在线, 不重生成缓存).
+
+    真实钢琴的频谱 onset 比 MIDI note_on 晚 10-30ms, 单帧严格目标难学;
+    膨胀后模型只需落在邻域内, 评估仍用原始严格标签.
+    ot: (B, T, 88) -> (B, T, 88)
+    """
+    k = 2 * radius + 1
+    return F.max_pool1d(ot.transpose(1, 2), kernel_size=k, stride=1,
+                        padding=radius).transpose(1, 2)
+
+
+def train_one_epoch(model, dataloader, optimizer, device, onset_weight=1.0,
+                    onset_dilate=0):
     model.train()
     total_loss = total_fa = total_of = n = 0
     pbar = tqdm(dataloader, desc="Train", disable=True)
@@ -68,7 +82,9 @@ def train_one_epoch(model, dataloader, optimizer, device):
         spec, ot, ft = spec.to(device), ot.to(device), ft.to(device)
         optimizer.zero_grad()
         pred = model(spec)
-        loss = onset_frame_loss(pred, {"onset": ot, "frame": ft})
+        train_ot = dilate_onsets(ot, onset_dilate) if onset_dilate else ot
+        loss = onset_frame_loss(pred, {"onset": train_ot, "frame": ft},
+                                onset_weight=onset_weight)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
         optimizer.step()
@@ -84,14 +100,15 @@ def train_one_epoch(model, dataloader, optimizer, device):
     return {"loss": total_loss / n, "frame_acc": total_fa / n, "onset_f1": total_of / n}
 
 
-def validate(model, dataloader, device):
+def validate(model, dataloader, device, onset_weight=1.0):
     model.eval()
     total_loss = total_fa = total_of = n = 0
     with torch.no_grad():
         for spec, ot, ft in dataloader:
             spec, ot, ft = spec.to(device), ot.to(device), ft.to(device)
             pred = model(spec)
-            loss = onset_frame_loss(pred, {"onset": ot, "frame": ft})
+            loss = onset_frame_loss(pred, {"onset": ot, "frame": ft},
+                                    onset_weight=onset_weight)
             fa, of1 = compute_metrics(pred, {"onset": ot, "frame": ft})
             total_loss += loss.item()
             total_fa += fa
@@ -114,6 +131,12 @@ def main():
                     help="混合训练 (默认开, 加 --no-mix 关闭)")
     ap.add_argument("--n-maestro", type=int, default=None,
                     help="MAESTRO train 曲目数 (默认全量 962)")
+    ap.add_argument("--workers", type=int, default=2,
+                    help="DataLoader workers (MAESTRO 加载并行, 默认 2)")
+    ap.add_argument("--onset-weight", type=float, default=1.0,
+                    help="onset loss 权重 (onset 正样本稀疏, >1 强制学 onset)")
+    ap.add_argument("--onset-dilate", type=int, default=0,
+                    help="训练用 onset 软目标膨胀半径 (帧), 评估仍用严格标签")
     args = ap.parse_args()
 
     # 脱离终端运行时, 把 stdout/stderr 全部并入日志文件, 避免管道断裂静默死亡
@@ -150,20 +173,24 @@ def main():
                                  max_dur_sec=MAX_DUR)
         train_ds = MixedSynthMaestro(synth_ds, real_ds)
         train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
-                                  collate_fn=collate_variable_length)
+                                  collate_fn=collate_variable_length,
+                                  num_workers=args.workers)
         val_ds = MaestroDataset(split="validation", max_files=args.val_size,
                                 max_dur_sec=MAX_DUR)
         val_loader = DataLoader(val_ds, batch_size=args.batch, shuffle=False,
-                                collate_fn=collate_variable_length)
+                                collate_fn=collate_variable_length,
+                                num_workers=args.workers)
         logger.info(f"Train: synth={len(synth_ds)} 段 + real={len(real_ds)} 段 "
                     f"→ mixed {len(train_ds)}; Val (MAESTRO real): {len(val_ds)}")
     else:
         train_ds = PianoSynthDataset(max_files=args.n_files, max_dur_sec=MAX_DUR)
         train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
-                                  collate_fn=collate_variable_length)
+                                  collate_fn=collate_variable_length,
+                                  num_workers=args.workers)
         val_ds = PianoSynthDataset(max_files=min(args.val_size, args.n_files // 4), max_dur_sec=MAX_DUR)
         val_loader = DataLoader(val_ds, batch_size=args.batch, shuffle=False,
-                                collate_fn=collate_variable_length)
+                                collate_fn=collate_variable_length,
+                                num_workers=args.workers)
         logger.info(f"Train files: {len(train_ds)}, val files: {len(val_ds)}")
 
     best_val = float("inf")
@@ -174,8 +201,11 @@ def main():
     for ep in range(start_epoch, args.epochs):
         t_ep = time.time()
         logger.info(f"=== Epoch {ep + 1}/{args.epochs} start ===")
-        tm = train_one_epoch(model, train_loader, optimizer, device)
-        vm = validate(model, val_loader, device)
+        tm = train_one_epoch(model, train_loader, optimizer, device,
+                             onset_weight=args.onset_weight,
+                             onset_dilate=args.onset_dilate)
+        vm = validate(model, val_loader, device,
+                      onset_weight=args.onset_weight)
         logger.info(
             f"Epoch {ep + 1}/{args.epochs}: "
             f"train_loss={tm['loss']:.4f} val_loss={vm['loss']:.4f} | "

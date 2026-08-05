@@ -10,6 +10,7 @@ __getitem__ 返回 (mel, onset, frame) = ((1,229,T), (T,88), (T,88)).
 混合训练: MixedSynthMaestro 偶数索引取合成域, 奇数索引取真实域 (1:1).
 """
 import csv
+import functools
 import hashlib
 import logging
 import os
@@ -22,6 +23,17 @@ from torch.utils.data import Dataset
 from train.config import train_config as cfg
 
 logger = logging.getLogger(__name__)
+
+
+@functools.lru_cache(maxsize=32)
+def _load_segments(cp):
+    """加载整首曲目段数组 (LRU: 同曲多段共享一次解压, 2026-08-04 性能修复).
+
+    此前每次 __getitem__ 解压整首 17MB 压缩 npz → CPU 瓶颈 (35min/epoch);
+    缓存后每首每轮最多解压一次, 回到 ~11min/epoch.
+    """
+    with np.load(cp) as d:
+        return (np.array(d["mels"]), np.array(d["onsets"]), np.array(d["frames"]))
 
 DEFAULT_MAESTRO_DIR = os.path.join(cfg.WORKSPACE_DIR, "data", "maestro",
                                    "maestro-v3.0.0")
@@ -67,6 +79,8 @@ def midi_to_labels(midi_path, sr=SR, hop=HOP):
 
 
 def _cache_path(midi_path, wav_path, max_dur_sec, cache_dir):
+    # 缓存键: midi|wav|时长. 磁盘缓存已是 np.savez 不压缩格式 (随机访问快),
+    # 不要加版本后缀, 否则会认不出已生成的 962 首 train 缓存而全量重生成.
     raw = f"{midi_path}|{wav_path}|{max_dur_sec}".encode("utf-8")
     return os.path.join(cache_dir, hashlib.sha256(raw).hexdigest()[:16] + ".npz")
 
@@ -109,25 +123,25 @@ class MaestroDataset(Dataset):
         import tempfile
         frame_labels, onset_labels = midi_to_labels(midi_path)
 
-        # 音频 → mel 段
+        # 音频 → mel 段. 统一固定帧数 SEG_FRAMES (60s 标签帧), 不足的段丢弃,
+        # 保证同曲内所有段形状一致 (np.stack 要求).
         audio, sr = librosa.load(wav_path, sr=SR, mono=True)
-        n_hop_per_seg = self.max_dur_sec * SR // HOP
+        SEG_FRAMES = self.max_dur_sec * SR // HOP
+        n_seg = min(len(audio) // (self.max_dur_sec * SR),
+                    frame_labels.shape[0] // SEG_FRAMES)
         mels, onsets, frames = [], [], []
-        for s in range(0, len(audio) // (self.max_dur_sec * SR)):
+        for s in range(n_seg):
             seg = audio[s * self.max_dur_sec * SR:(s + 1) * self.max_dur_sec * SR]
-            if len(seg) < MIN_SEG_RATIO * self.max_dur_sec * SR:
-                break
             mel = librosa.feature.melspectrogram(
                 y=seg, sr=SR, n_mels=N_MELS, hop_length=HOP, fmin=30, fmax=8000)
             mel_db = librosa.power_to_db(mel, ref=np.max)
             mel_db = np.clip((mel_db + 80) / 80, -1, 1).astype(np.float32)
 
-            # 标签段: 与 mel 帧数对齐 (取 min)
-            f0 = s * n_hop_per_seg
-            n_frames = min(mel_db.shape[1], frame_labels.shape[0] - f0)
-            mels.append(mel_db[:, :n_frames])
-            onsets.append(onset_labels[f0:f0 + n_frames])
-            frames.append(frame_labels[f0:f0 + n_frames])
+            # 统一截到 SEG_FRAMES 帧 (mel 2584 vs 标签 2583, 取标签帧数)
+            f0 = s * SEG_FRAMES
+            mels.append(mel_db[:, :SEG_FRAMES])
+            onsets.append(onset_labels[f0:f0 + SEG_FRAMES])
+            frames.append(frame_labels[f0:f0 + SEG_FRAMES])
 
         if not mels:
             logger.warning(f"  空段: {os.path.basename(midi_path)}")
@@ -137,8 +151,8 @@ class MaestroDataset(Dataset):
 
         os.makedirs(os.path.dirname(cp), exist_ok=True)
         tmp = cp + ".tmp.npz"
-        np.savez_compressed(tmp, mels=np.stack(mels), onsets=np.stack(onsets),
-                            frames=np.stack(frames))
+        np.savez(tmp, mels=np.stack(mels), onsets=np.stack(onsets),
+                 frames=np.stack(frames))  # v2: 不压缩, 随机访问快 ~4x
         os.replace(tmp, cp)
         logger.info(f"  缓存: {os.path.basename(cp)} "
                     f"({len(mels)} 段, {os.path.getsize(cp)/1e6:.0f}MB)")
@@ -148,13 +162,10 @@ class MaestroDataset(Dataset):
 
     def __getitem__(self, idx):
         cp, seg = self._segments[idx]
-        with np.load(cp) as d:
-            mel = d["mels"][seg]
-            onset = d["onsets"][seg]
-            frame = d["frames"][seg]
-        return (torch.from_numpy(mel).float().unsqueeze(0),
-                torch.from_numpy(onset).float(),
-                torch.from_numpy(frame).float())
+        mels, onsets, frames = _load_segments(cp)
+        return (torch.from_numpy(mels[seg]).float().unsqueeze(0),
+                torch.from_numpy(onsets[seg]).float(),
+                torch.from_numpy(frames[seg]).float())
 
 
 class MixedSynthMaestro(Dataset):

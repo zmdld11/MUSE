@@ -96,7 +96,8 @@ class OnsetsAndFrames(nn.Module):
         return {"onset": onset, "frame": frame}
 
 
-def onset_frame_loss(pred, target):
+def onset_frame_loss(pred, target, onset_weight=1.0):
+    """onset + frame 双目标 BCE. onset 正样本稀疏 (~3%), 加权可强制模型学 onset."""
     o_loss = F.binary_cross_entropy(pred["onset"], target["onset"])
     f_loss = F.binary_cross_entropy(pred["frame"], target["frame"])
-    return o_loss + f_loss
+    return onset_weight * o_loss + f_loss
