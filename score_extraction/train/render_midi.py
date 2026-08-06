@@ -96,7 +96,8 @@ def _find_soundfont() -> str | None:
 
 def _render_with_fluidsynth(pm: pretty_midi.PrettyMIDI,
                              sr: int,
-                             max_dur_sec: float) -> np.ndarray:
+                             max_dur_sec: float,
+                             program: int = 0) -> np.ndarray:
     """Render a PrettyMIDI object with FluidSynth and return float32 mono audio.
 
     Parameters
@@ -122,7 +123,7 @@ def _render_with_fluidsynth(pm: pretty_midi.PrettyMIDI,
     fs = fluidsynth.Synth(gain=0.4, samplerate=float(sr))
     # Do NOT call start() — we use get_samples() for offline rendering.
     sfid = fs.sfload(sf_path)
-    fs.program_select(0, sfid, 0, 0)  # Acoustic Grand Piano
+    fs.program_select(0, sfid, 0, program)  # 0=Acoustic Grand, 4=EPiano, ...
     logger.debug("FluidSynth synth created (sr=%d)", sr)
 
     total_dur = min(pm.get_end_time(), max_dur_sec)
@@ -284,7 +285,8 @@ def _note_to_midi_bin(pitch):
     return pitch - cfg.MIDI_OFFSET
 
 
-def render_midi(midi_path, sr=None, hop_length=None, max_dur_sec=None):
+def render_midi(midi_path, sr=None, hop_length=None, max_dur_sec=None,
+                program: int = 0):
     """Render a MIDI file to audio + training labels.
 
     Uses FluidSynth when available; falls back to additive synthesis.
@@ -345,7 +347,7 @@ def render_midi(midi_path, sr=None, hop_length=None, max_dur_sec=None):
 
     if cfg.FLUIDSYNTH_ENABLED:
         try:
-            audio = _render_with_fluidsynth(pm, sr, max_dur_sec)
+            audio = _render_with_fluidsynth(pm, sr, max_dur_sec, program)
             logger.debug("FluidSynth rendered %s",
                          os.path.basename(midi_path))
         except Exception as exc:

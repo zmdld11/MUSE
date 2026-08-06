@@ -23,9 +23,10 @@ CACHE_DIR = os.path.join(cfg.WORKSPACE_DIR, "data", "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 
-def _cache_path(midi_path: str, max_dur_sec: float) -> str:
-    """Deterministic cache key from MIDI path + duration."""
-    raw = f"{midi_path}|{max_dur_sec}".encode("utf-8")
+def _cache_path(midi_path: str, max_dur_sec: float, program: int = 0) -> str:
+    """Deterministic cache key from MIDI path + duration + program."""
+    raw = (f"{midi_path}|{max_dur_sec}" if program == 0
+           else f"{midi_path}|{max_dur_sec}|p{program}").encode("utf-8")
     h = hashlib.sha256(raw).hexdigest()[:16]
     return os.path.join(CACHE_DIR, f"{h}.npz")
 
@@ -39,10 +40,11 @@ class PianoSynthDataset(Dataset):
     """
 
     def __init__(self, midi_dir=None, max_files=None, max_dur_sec=None,
-                 force_recache=False):
+                 force_recache=False, programs=(0,)):
         midi_dir = midi_dir or cfg.MIDI_DIR
         self.max_dur_sec = max_dur_sec or cfg.MAX_DUR_SEC
         self.force_recache = force_recache
+        self.programs = tuple(programs)
 
         # Collect MIDI files (recursive)
         self.midi_paths = sorted(
@@ -82,7 +84,8 @@ class PianoSynthDataset(Dataset):
 
     def __getitem__(self, idx):
         path = self.valid_paths[idx]
-        cpath = _cache_path(path, self.max_dur_sec)
+        program = self.programs[idx % len(self.programs)]
+        cpath = _cache_path(path, self.max_dur_sec, program)
 
         # Try loading from cache
         if not self.force_recache and os.path.isfile(cpath):
@@ -101,7 +104,7 @@ class PianoSynthDataset(Dataset):
 
         # Render MIDI -> audio + labels
         try:
-            data = render_midi(path, max_dur_sec=self.max_dur_sec)
+            data = render_midi(path, max_dur_sec=self.max_dur_sec, program=program)
         except Exception as e:
             logger.warning("Render failed for %s: %s, using next file", path, e)
             return self.__getitem__((idx + 1) % len(self))
