@@ -382,3 +382,78 @@ def process_frames(onset_probs: np.ndarray, frame_probs: np.ndarray,
     logger.info(f"  After onset verify: {len(candidates)} candidates")
 
     return candidates
+
+
+def rescue_notes(candidates: list[dict], frame_probs: np.ndarray,
+                 hop_length: int = 512, sr: int = 22050,
+                 frame_thresh: float = 0.5, min_frames: int = 5,
+                 overlap_ratio: float = 0.5) -> list[dict]:
+    """补充解码 (2026-08-07): 找回"模型检测到但 BP 解码没输出"的音符.
+
+    BP 解码只从 onset 局部峰值启动, 且创建音符时清零相邻 ±1 半音能量,
+    导致复音场景里 frame prob 高但 onset 峰弱的音被吞掉.
+    rescue pass 在解码后扫描原始 frame probs, 把未被任何已输出同音高
+    音符覆盖的高概率连续段补成音符.
+
+    Args:
+        candidates: BP 解码输出 (含 onset_time/offset_time/pitch)
+        frame_probs: 原始 frame 概率 (T, 88)
+        frame_thresh: 补充段的概率阈值 (默认 0.5, 与解码启动强度一致)
+        min_frames: 最短补充段帧数 (hop=512 时 5 帧 ≈ 116ms)
+        overlap_ratio: 与已输出同音高音符重叠比例超过该值则跳过
+    """
+    if candidates is None or len(candidates) == 0:
+        return []
+
+    times = np.arange(frame_probs.shape[0]) * hop_length / sr
+    existing: dict[int, list[tuple[float, float]]] = {}
+    for c in candidates:
+        existing.setdefault(int(c["pitch"]), []).append(
+            (float(c["onset_time"]), float(c["offset_time"]))
+        )
+
+    rescued: list[dict] = []
+    for pitch_bin in range(frame_probs.shape[1]):
+        pitch = pitch_bin + 21
+        probs = frame_probs[:, pitch_bin]
+        mask = probs > frame_thresh
+        if not mask.any():
+            continue
+        idx = np.where(mask)[0]
+        # 连续段切分
+        starts = [int(idx[0])]
+        ends: list[int] = []
+        for i in range(1, len(idx)):
+            if idx[i] - idx[i - 1] > 1:
+                ends.append(int(idx[i - 1]))
+                starts.append(int(idx[i]))
+        ends.append(int(idx[-1]))
+
+        for s, e in zip(starts, ends):
+            if e - s + 1 < min_frames:
+                continue
+            s_t, e_t = float(times[s]), float(times[e])
+            seg_dur = e_t - s_t
+            covered = False
+            for c_onset, c_offset in existing.get(pitch, []):
+                ov = min(e_t, c_offset) - max(s_t, c_onset)
+                if ov > 0 and ov >= overlap_ratio * seg_dur:
+                    covered = True
+                    break
+            if covered:
+                continue
+            rescued.append({
+                "onset_frame": int(s),
+                "offset_frame": int(e),
+                "onset_time": s_t,
+                "offset_time": e_t,
+                "pitch": pitch,
+                "pitch_bin": int(pitch_bin),
+                "confidence": float(probs[s:e + 1].mean()),
+                "onset_prob": 0.0,
+                "rescued": True,
+            })
+    if rescued:
+        logger.info("  Rescue pass: +%d notes (frame_thresh=%.1f, min_frames=%d)",
+                    len(rescued), frame_thresh, min_frames)
+    return rescued

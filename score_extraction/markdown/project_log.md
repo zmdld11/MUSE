@@ -756,3 +756,232 @@ VER3.0 混合训练 (GiantMIDI 合成 + MAESTRO 真实 1:1, 从 VER2.2 接续) �
 - 真实域帧级 F1 0.16 / note 级 ~0.15 (需完整评测确认), 主要瓶颈是 precision (假阳性)
 - 候选改进: 峰值后处理 (NMS) 需与 0.1-0.2 阈值配合、note 级容差评估、真实域数据增强
 - 用 eval 闭环跑 VER3.0 vs VER2.0 合成域对比 (预期 VER3.0 显著更好)
+
+---
+
+## 2026-08-06 — 高音区"断音"诊断 (VER3.2 真实录音)
+
+> 起因: 用户听感反馈"高音只能检测到 onset 瞬间能量, 延音衰减后检测不到, 高音短, 改管线不治本".
+> 工具: `eval/high_register_diag.py` (时长/保持率) + `high_register_diag2.py` (预测音符帧概率曲线) + `high_register_diag3.py` (GT 局部窗口搜索).
+
+### 发现 1: 模型高音帧概率并不塌陷
+对 VER3.2 预测音符回看 frame probs (真实钢琴轨):
+
+| 音区 | onset 0-60ms | 100-200ms | 200-350ms | 400-600ms | 激活/音符中位 |
+|---|---|---|---|---|---|
+| high(>=72) | 0.933 | 0.969 | 0.961 | 0.943 | 1.00 |
+| mid(55-71) | 0.816 | 0.924 | 0.924 | 0.901 | 0.65 |
+| low(<55) | 0.672 | 0.901 | 0.882 | 0.804 | 0.00 |
+
+"onset>0.5 但 100ms 后 <0.5" 的比例: high 0% / mid 1% / low 2%.
+**VER3.2 的高音加权训练已解决延音检测, 概率全程稳定在 0.93-0.97.**
+
+### 发现 2: GT 未匹配的高音其实被模型检测到了
+对 GT 音符做 onset±0.5s 局部窗口搜索 (窗口前半/后半 max prob):
+
+| 音区 | 组 | n | 窗口max | 窗口mean | >0.5帧占比 | 前半max | 后半max |
+|---|---|---|---|---|---|---|---|
+| high | matched | 79 | 0.992 | 0.917 | 1.00 | 0.988 | 0.990 |
+| high | unmatched | 198 | 0.949 | 0.335 | 0.27 | **0.393** | **0.929** |
+| mid | unmatched | 302 | 0.917 | 0.352 | 0.31 | 0.633 | 0.872 |
+| low | unmatched | 159 | **0.373** | 0.029 | 0.00 | 0.025 | 0.246 |
+
+未匹配高音的"后半 max 0.93"说明模型在 GT 记谱时间附近检测到了这些音,
+只是 **onset 偏移 >250ms (谱面 vs 演奏/变速/加花)**, 硬匹配失败. 真正漏检的是低音区 (max 仅 0.37).
+
+### 发现 3: 听感"断"的直接来源 = 碎音化 + 多检
+- VER3.2: 1122 音符 (GT 843); 高音 428 (GT 277) → 多检 ~55%
+- `<50ms` 碎音 12 个 (10 个在高音区) — 后处理最短长度未拦住的 1 帧音符
+- 同音高 gap<120ms 拆分对 24 对 (涉及 45 个音符) — 连续激活被切成两段
+- VER3.1 (331 音符): 0 碎音 0 拆分, 但漏检多 → 参数是灵敏度-碎音权衡
+
+### 结论与建议
+1. 模型层: 高音已达标, VER3.3 若训, 应转低音区加权 + 多检抑制 (precision), 而非继续加高音权重.
+2. 后处理层 (这才是当前"断音"的治本点): 消灭 1 帧音符 + 同音高 gap≤120ms 桥接合并 (`src/merge_notes.py` 已有) + 膝跳回声过滤. 需确认 VER3.2 导出路径是否正确接入 min_note_len/merge.
+3. 评测口径: GT 时间轴与演奏偏差 >250ms, strict onset 匹配不客观 → 改用局部窗口匹配 (±0.5s max prob) 或旋律轮廓/人工听感.
+---
+
+## 2026-08-07 — MAESTRO val 真实域基线 (VER3.2 + BP 后处理)
+
+> 工具: `eval/bench_maestro_model.py` (逐 60s 段, mir_eval note_f1: onset±50ms, pitch±50cents, 忽略 offset)
+> 数据: MAESTRO v3.0.0 validation 前 70 首 / 428 段 / 211s
+
+### 基线数字
+
+| 音区 | P | R | F1 | 段数 |
+|---|---|---|---|---|
+| 总体 | 0.710 | 0.646 | **0.668** | 428 |
+| low(<55) | 0.561 | 0.616 | **0.570** | 428 |
+| mid(55-71) | 0.786 | 0.637 | 0.693 | 428 |
+| high(>=72) | 0.725 | 0.740 | 0.720 | 425 |
+
+### 结论
+1. 低音区是最短板 (F1 0.570), P/R 双低 → 低音加权训练方向确认.
+2. 总体 P 0.71 说明多检仍是问题; mid 区 R 0.637 最低 (漏检集中在中音区).
+3. 2 首单段曲目 F1=0 (疑似极短/异常, 可忽略).
+4. 此基线数字可信 (MAESTRO 时间轴精确), 替代此前 VER3.0 的 0.16 (口径/后处理不同, 不可直接比较).
+---
+
+## 2026-08-07 — VER3.3_LowAug 训练结果 (失败, 已存档不启用)
+
+### 训练配置
+- 起点 VER3.2_Enhanced, 8 epochs, lr 1e-4, 混合 (10854 合成 + 962 MAESTRO), 2.4h
+- 低音加权: frame×3 / onset×2 (MIDI<55)
+- 在线增强: 高斯噪声σ0.03 + 频带遮蔽(20-40bin×1-2) + 时间遮蔽(5-15帧) + 频带增益(×0.5-1.5), 概率50%
+- 产物: VER3.3_LowAug.pth / _best.pth (epoch5, val_loss 0.1038) / _latest.pt
+
+### 三线评测 (VER3.2 → VER3.3_best)
+
+| 评测 | VER3.2 | VER3.3 | 变化 |
+|---|---|---|---|
+| MAESTRO val F1 | 0.668 | **0.500** | -0.168 |
+| MAESTRO val R | 0.646 | **0.404** | -0.242 |
+| MAESTRO val P | 0.710 | 0.688 | -0.022 |
+| himawari 闭环 F1 | 0.954 | 0.963 | +0.009 |
+| canon 闭环 F1 | 0.898 | 0.888 | -0.010 |
+| canon 闭环 R | 0.828 | 0.805 | -0.023 |
+
+### 失败归因
+**增强过度 → 模型保守化**: 训练中一半样本被噪声/遮蔽破坏, 模型学会"少输出",
+真实域 recall 暴跌 0.646→0.404; 合成闭环 R 也同步下降 (canon 0.828→0.805).
+低音加权的收益被增强副作用完全淹没. val_loss 0.104 无法反映 note 级退化.
+
+### 结论与下一步
+- 活动模型保持 VER3.2_Enhanced (未被覆盖)
+- VER3.3 存档, 不启用
+- 下一版: 增强强度大幅减弱 (噪声σ0.01 / 概率20% / 去时间遮蔽) 或拆成
+  无增强+低音加权 A/B, 单独验证低音加权收益
+---
+
+## 2026-08-07 — VER3.3A/控制组实验: 微调坍缩根因定位 (重要)
+
+### 实验链 (全部从 VER3.2 resume, lr 1e-4, 1 epoch, MAESTRO val 前20首)
+
+| 实验 | 训练数据 | 真实域 R | 真实域 F1 | 合成闭环 |
+|---|---|---|---|---|
+| VER3.2 基线 | — | 0.614 | 0.644 | himawari 0.954 / canon 0.898 |
+| VER3.3A (低音 frame×2) | 混合 1:1 | 0.343 | 0.433 | 正常 (himawari 0.963) |
+| 控制组 (无加权无增强) | 混合 1:1 | 0.278 | 0.353 | 正常 (himawari 0.966 / canon 0.904) |
+| SynthOnly (无加权无增强) | 纯合成 | 0.465 | 0.569 | — |
+
+### 排除的因素
+- 30s 训练缓存 mel/标签对齐 (VER3.2 推理 frame recall 0.856) ✓ 排除
+- 60s vs 30s 段长 (30s 评测同样崩 R 0.267) ✓ 排除
+- BatchNorm running stats (替换回 VER3.2 后 F1 0.317, 未恢复) ✓ 排除
+- 低音加权 (控制组无加权同样崩) ✓ 排除
+
+### 结论
+1. **从 VER3.2 继续微调本身就会破坏真实域 recall**: 纯合成微调 R -0.15,
+   混合微调 R -0.34. VER3.2 已是当前训练分布的收敛点, 继续训练=灾难性遗忘.
+2. 混合 1:1 训练里真实段梯度把模型搞坏 (比纯合成严重), 机制未完全定位
+   (疑似真实段标签密度/特征分布与 VER3.2 训练时不同, 或 30s 段配方差异).
+3. 训练中 val_loss/onset_f1 完全无法反映 note 级退化, 以后必须每 epoch 跑
+   MAESTRO val note 级评测.
+
+### 下一步候选
+- A. 轻触微调: lr 1e-5, 500 步, 冻结 BN, 单一变量
+- B. 从 VER3.1/VER2.0 重新走 VER3.2 配方 (高音加权+增强5ep) 验证可复现性
+- C. 接受 VER3.2 为当前最优, 转后处理/评测/canon GT 路线
+- 活动模型保持 VER3.2_Enhanced
+---
+
+## 2026-08-07 — 轻触微调实验 (A) 失败 + 最终根因确认
+
+### 实验
+VER3.2 resume → lr 1e-5, 500 步, 冻结 BN, 混合数据, 3.6min → VER3.4_LightTouch
+MAESTRO val 20 首: R=0.333 (基线 0.614)
+
+### 决定性证据
+1. 权重 diff: LightTouch vs VER3.2 → max 0.0048 / mean 0.00036 (极小)
+2. 合成闭环: LightTouch 完全正常 (himawari 0.963)
+3. 文件格式排除: 把 VER3.2 权重保存为新文件评测 → R=0.614 正常
+4. 评测环境排除: VER3.2 三次重测 R 均 0.614
+5. 控制组/VER3.3A 权重 diff 高达 290 (训练中发生异常大变化, 疑似梯度/BN 问题)
+
+### 最终结论
+- VER3.2 是极敏感平衡点: 真实域弱音 frame prob 集中在 BP frame_thresh=0.2
+  边界附近, 任何微小权重扰动 (mean 0.00036) 就让成片弱音越过阈值 → recall 崩.
+  合成域概率远离阈值, 所以所有微调实验合成闭环都正常.
+- 从 VER3.2 微调的路彻底堵死 (A/B/轻触/纯合成全部失败).
+- 训练中 val_loss 无法反映 note 级退化 (再次确认).
+
+### 新发现的可行动方向 (不动模型)
+- BP 后处理 frame_thresh=0.2 可能过高: 真实域弱音在边界附近,
+  扫描 frame_thresh 0.10-0.30 看 MAESTRO val recall/precision 曲线
+  → 这是纯后处理改动, 不影响模型, 立即可试.
+---
+
+## 2026-08-07 — VER4.0 Transformer 训练启动 + 性能调优
+
+### 背景
+- VER3.2 微调全部失败（任何 resume 都会破坏真实域 recall），决定从零训练 VER4.0（ResBlock + Transformer，2.05M 参数，onset/frame/offset 三头）。
+- 数据：GiantMIDI 合成 10852 + MAESTRO 真实 18678 段，1:2 混合；15s 序列（645 帧）；lr 3e-4 + 1000 步 warmup；每 epoch 自动跑 MAESTRO val note 级评测并按 note_f1 选 best。
+
+### 问题：训练只有 2.4s/步，10 epoch 要 13 小时
+排查过程（全部有实验数据）：
+1. **多开 DataLoader worker 无效**：bench 2 worker=12.8 sample/s，8 worker=10.4 sample/s（反而更慢）。
+2. **随机打乱是数据侧真瓶颈**：同样 workers=2，顺序采样 8.33 batch/s vs 随机打乱 1.74 batch/s（LRU 缓存跨曲目 npz 命中率低）。已实现 `PieceShuffleSampler`（按曲目对分块打乱，块内连续，block=64）。
+3. **但真实训练仍 2.4s/步，说明不是数据侧**：纯 GPU 计算基准（随机张量，无数据加载）在坏状态下 3.08s/步。
+4. **逐部件 profiling**：cuDNN 正常（单 conv3x3 仅 4.5ms），模型稳态 fwd+bwd+Adam = 520ms/步（power 50W、温度 51-57°C、SM 1.6-2.1GHz）。
+5. **结论：早期 2.4-3s/步是机器瞬时状态**——后台有 35 个 CUDA 上下文（Chrome/WebView/QQ/cloudmusic/Magpie 等），某程序抢 GPU 导致降速。基准复跑后稳定 0.52s/步，完整循环 0.8s/步。
+
+### 已应用修改
+- `train/train_v4.py`：
+  - 新增 `PieceShuffleSampler`（曲目分块打乱，替换 shuffle=True）；
+  - 开启 `cudnn.benchmark=True` + TF32（实测仅 +3%，保留无害）。
+- 新增基准脚本：`train/bench_workers.py`、`train/bench_shuffle.py`、`train/bench_loop.py`、`train/bench_profile.py`、`train/bench_bisect.py`、`train/bench_sustain.py`（都留着，以后改模型先跑 bench_loop 验证速度）。
+
+### 当前状态（20:08）
+- 训练 PID 49932，**0.5s/步**（step 400 @ 20:08:26），单 epoch ~18 分钟，10 epoch 预计 ~3.5 小时。
+- 关注点：前 1000 步 warmup 内 onset_f1=0.000 属正常，step 1000 后必须爬升；若仍为 0 需停训排查 onset 头。
+- 用户可操作：训练时尽量关掉 Magpie/Chrome/WebView/视频播放等吃 GPU 的程序；电源计划切"高性能"或能让 4060 从 50W 墙提上去。
+
+### 追加（20:45）：onset 退化解的根因与修复
+- **现象**：step 1000（warmup 结束）后 onset_f1 仍为 0.000；loss 持续下降但 frame_acc 96%（全压 0 的假繁荣）。
+- **根因**：onset 标签极稀疏（正样本 ~1/56760），未加权 BCE 的最优解就是全输出 0；10x 权重也不够（目标帧概率反而从 0.31 掉到 0.017）。
+- **实验定标**（单音符 toy）：onset_pos=100 → 掉到 0.13；1000 → 爬到 0.72；5000 → 0.99。最终取 onset=2000x / frame=10x / offset=100x。
+- **Epoch 1 结果（20:44）**：train_loss=3.219, NOTE_F1=0.062（P=0.036 / R=0.302），21.1 min/epoch。方向正确（recall 已起），precision 待后续 epoch 收敛；若 epoch 3 仍 <0.1 需再调。
+- **训练 PID 13444**，0.55-0.6s/步，10 epoch ETA ~00:30。
+
+### 追加（08-08 00:27，整夜监督中）
+- 22:04 从 epoch2 存档续训；22:21 电脑再次整机崩溃（无内核错误记录，疑似硬死机），epoch3 后半段丢失。
+- 22:31 新增防待机（SetThreadExecutionState）+ 每 1000 步 checkpoint + --resume 断点续训，从 step1000 存档重启（PID 21476）。
+- 22:37-00:25 已跑完 epoch 4-7：NOTE_F1 = 0.096 → 0.108 → 0.112 → 0.107，进入平台期。
+- 发现：warmup 每 epoch 重置（前 1000 步从 0 爬 lr），有效学习率仅一半；epoch 10 后计划以全局 warmup 续训至 20 epoch。
+- 若 20 epoch 仍 <0.2：下一步离线扫 BP decode 阈值（现 P=0.064，误报淹没），不占训练 GPU。
+
+### 追加（08-08 08:55，按用户要求暂停训练）
+- 02:07 机器整机重启过一次（重启前 epoch11 死于 step1200，step1000 存档完好）；夜间机器关机至 08:26。
+- 08:30 从 epoch11/step1000 存档续训，**epoch 12 完成：NOTE_F1=0.130（P=0.079/R=0.423）创新高**，epoch 13 刚开始即按用户要求暂停。
+- **暂停状态**：VER4.0_latest.pt = epoch12（含优化器，note_f1=0.130）；VER4.0_best.pth = epoch12。
+- **今晚续训命令**（workdir=score_extraction）：
+  python train/train_v4.py --epochs 20 --save VER4.0 --val-n 30 --max-steps 2000 --backend transformer --resume model\VER4.0_latest.pt
+  （--epochs 20 表示总目标 20 轮，resume 后从 epoch13 跑到 20）
+- 已带修复：防待机、每1000步存档、全局warmup（不再每轮重置lr）、val前empty_cache+inference_mode、val失败不中断训练。
+
+### 追加（08-08 17:15，GPU 驱动状态退化，准备重启）
+- 现象：小 CUDA 算子 0.35s 正常、SM 满频 2580MHz，但模型 fwd+bwd 需 1.5-5s/步（16:16 时仅 0.86-1.46s）；任何启动方式（前台/后台/关 benchmark/关节流）均复现慢速。
+- 判断：今日多次 Stop-Process -Force 强杀 CUDA 进程导致驱动/cuDNN 状态退化，需重启电脑重置。
+- 重启前：所有 python 进程已清理；VER4.0_latest.pt（epoch12, 含optimizer, F1=0.130）与 VER4.0_best.pth 完好（08:50 落盘）。
+- 重启后续训命令不变：train/train_v4.py --epochs 20 --save VER4.0 --val-n 30 --max-steps 2000 --backend transformer --resume model\VER4.0_latest.pt
+- 已恢复 cudnn.benchmark=True（08:30 健康配置）；若重启后仍慢，下一步改 batch 8→6 降显存占用。
+
+### 追加（08-08 18:26，找到慢速/卡死的真正根因）
+- **根因确认：显存顶满**。训练 batch8 占用 ~7.5GB + 桌面应用 ~2GB = 9.5GB > 8.2GB，驱动无余量后开始系统内存换页，步速从 0.5s 崩到 1.5-5s+，且表现为"前台/后台/重启都无法恢复"。
+- **修复：batch 8→6 + PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True** → 显存 6277/8188 MiB，余量 ~1.9GB，步速恢复 0.5s/step。
+- 重启电脑本身无效（桌面应用重载后仍占 2GB）；之前误判的"驱动退化/待机/EcoQoS"均非主因。
+- 当前：PID 43700，epoch 13/20 进行中（18:20 启动），预计 21:00 前完成剩余 8 轮。
+- 教训：8GB 显存笔记本 + 白天桌面应用，batch 必须 ≤6；后续若再加桌面应用还需进一步降 batch 或关应用。
+
+### 追加（08-08 19:16，两大根因已修）
+1. **显存顶满**：训练 batch8(~7.5GB) + 桌面应用(~2GB) > 8.2GB → 驱动换页，步速崩到 1.5-5s+。修复：batch 8→6 + expandable_segments → 6.8GB，恢复 0.5s/步。
+2. **val 阶段进程反复无声死亡**（21:53 / 01:49 / 18:39 / 19:05 共 4 次，均无 traceback）：pretty_midi C++ 解析每片段重复调用是嫌疑之一（已改为每首一次），但隔离测试后仍复发；最终方案：**val note 评测整体移入独立子进程**（train/eval_val_worker.py），原生崩溃不再影响训练进程。
+3. 恢复出 epoch14 的 NOTE_F1=0.142（P=0.088/R=0.436），子进程评测仅 57s。
+4. 当前：PID 45032，epoch 15/20 进行中。
+
+### 追加（08-08 21:05，VER4.0 训练完成）
+- **最终结果**：20/20 epoch 完成，best NOTE_F1=0.150（epoch 19），最终 epoch F1=0.145（P=0.091/R=0.419）。
+- F1 轨迹（子进程 val 修复后）：e15=0.142 → e16=0.148 → e17=0.139 → e18=0.141 → e19=0.150 → e20=0.145。已进入平台期。
+- 产物：model/VER4.0.pth（最终）、VER4.0_best.pth（epoch19，0.150）、VER4.0_latest.pt（epoch20+优化器，可续训）。
+- 备注：日志显示 expandable_segments 在本 PyTorch 版本未生效（UserWarning），显存修复实际靠 batch 8→6。
+- 遗留问题：VAL NOTE_F1=0.15 仍远低于 VER3.2 的 0.668，且 P≈0.09（误报淹没）；下一步方向：①BP 解码阈值扫描；②模型架构/损失再调；③更多 epoch 或真实域增强。用户醒来后讨论。

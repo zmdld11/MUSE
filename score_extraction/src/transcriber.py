@@ -1,4 +1,4 @@
-"""Layer 2: VER2.0 — uses our trained OnsetsAndFrames bootstrap model."""
+﻿"""Layer 2: VER2.0 — uses our trained OnsetsAndFrames bootstrap model."""
 import logging
 import os
 
@@ -26,8 +26,16 @@ def _load_model():
         logger.warning(f"No trained model at {model_path}, falling back to basic-pitch")
         return None
 
-    from train.model import OnsetsAndFrames
-    _model = OnsetsAndFrames(n_mels=229, n_midi=88)
+    state = torch.load(model_path, map_location="cpu", weights_only=True)
+    from train.model_v4 import OnsetsFramesV4
+    if any(k.startswith("transformer.") for k in state):
+        _model = OnsetsFramesV4(n_mels=229, n_midi=88, backend="transformer")
+        logger.info("V4 Transformer model detected")
+    else:
+        from train.model import OnsetsAndFrames
+        _model = OnsetsAndFrames(n_mels=229, n_midi=88)
+        logger.info("VER2/3 LSTM model detected")
+    _model.load_state_dict(state)
     _model.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=True))
     _model.eval()
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -56,16 +64,35 @@ def _ours_inference(model, audio_path: str) -> dict:
     mel_db = librosa.power_to_db(mel, ref=np.max)
     mel_db = np.clip((mel_db + 80) / 80, -1, 1)
 
+    from train.model_v4 import OnsetsFramesV4
     spec = torch.from_numpy(mel_db).float().unsqueeze(0).unsqueeze(0).to(device)
-
-    with torch.no_grad():
-        pred = model(spec)
-
-    onset = pred["onset"].squeeze(0).cpu().numpy()
-    frame = pred["frame"].squeeze(0).cpu().numpy()
+    if isinstance(model, OnsetsFramesV4):
+        # V4 Transformer: 位置编码上限 2048 帧 + 注意力 O(T^2), 必须分窗推理
+        T = mel_db.shape[1]
+        CHUNK, OVERLAP = 1291, 43  # ~30s 窗 + 1s 重叠
+        onset_acc = np.zeros((T, 88), dtype=np.float64)
+        frame_acc = np.zeros((T, 88), dtype=np.float64)
+        wsum = np.zeros((T, 1), dtype=np.float64)
+        with torch.no_grad():
+            for start in range(0, T, CHUNK - OVERLAP):
+                end = min(start + CHUNK, T)
+                if end - start < 64:
+                    break
+                pred = model(spec[:, :, :, start:end])
+                o = pred["onset"].squeeze(0).cpu().numpy()[: end - start]
+                f = pred["frame"].squeeze(0).cpu().numpy()[: end - start]
+                onset_acc[start:end] += o
+                frame_acc[start:end] += f
+                wsum[start:end] += 1
+        onset = (onset_acc / np.maximum(wsum, 1)).astype(np.float32)
+        frame = (frame_acc / np.maximum(wsum, 1)).astype(np.float32)
+    else:
+        with torch.no_grad():
+            pred = model(spec)
+        onset = pred["onset"].squeeze(0).cpu().numpy()
+        frame = pred["frame"].squeeze(0).cpu().numpy()
     logger.info(f"Our model: onset={onset.shape}, frame={frame.shape}")
     return {"onset_probs": onset, "frame_probs": frame, "contour": np.zeros((onset.shape[0], 264), dtype=np.float32), "sr": 22050, "hop_length": 512}
-
 
 def _basic_pitch_inference(audio_path: str) -> dict:
     try:
