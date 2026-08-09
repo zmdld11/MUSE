@@ -85,3 +85,9 @@ score_extraction/eval/reports/_*.wav
 score_extraction/eval/reports/_*_verify.py
 score_extraction/eval/reports/_diag_verify.txt
 score_extraction/eval/reports/_poly_verify.txt
+
+# AutoDL ÔÆÑµÁ·×¼±¸ (2026-08-09)
+score_extraction/model/
+!score_extraction/model/log/
+legacy_se34/
+score_extraction/train/*.pid

@@ -985,3 +985,96 @@ MAESTRO val 20 首: R=0.333 (基线 0.614)
 - 产物：model/VER4.0.pth（最终）、VER4.0_best.pth（epoch19，0.150）、VER4.0_latest.pt（epoch20+优化器，可续训）。
 - 备注：日志显示 expandable_segments 在本 PyTorch 版本未生效（UserWarning），显存修复实际靠 batch 8→6。
 - 遗留问题：VAL NOTE_F1=0.15 仍远低于 VER3.2 的 0.668，且 P≈0.09（误报淹没）；下一步方向：①BP 解码阈值扫描；②模型架构/损失再调；③更多 epoch 或真实域增强。用户醒来后讨论。
+
+---
+
+## 2026-08-08 晚 — VER3.2RE 训练启动 (复现 VER3.2 配方 + 全量对比日志)
+
+### 用户需求
+把 VER3.2 的模型"重新跑一遍"——复现当时是怎么训出来的, 训 50 轮得到 VER3.2RE, 训练时多记录对比数据.
+
+### git 历史考古结论 (VER3.2 到底怎么来的)
+1. **VER3.0** (8/5): 从 VER2.2_BootstrapFull resume, 100 epochs, lr 1e-4, workers 2, onset-weight 5, onset-dilate 0, 合成+MAESTRO 混合 1:1 (命令在 train/watch_training.ps1 里).
+2. **VER3.1_MultiTimbre** (8/6 18:27, 提交 239e48a): 加电钢音色 —— dataset.py 支持 programs=(0,4), 渲染改 program_select.
+3. **VER3.2_Enhanced** (8/6 19:12, 提交 cfc4ee4): VER3.1 之后约 45 分钟 (≈2-3 epochs) 的续训, 效果 = 高音区加权. **当时的训练命令/高音加权实现没有提交**, 仓库里只有 VER3.3 的低音加权实现 (--low-frame-weight).
+4. **在线增强 (augment.py) 8/7 才出现** → VER3.2 训练时不存在, 复现时禁用.
+5. 8/7 全部"从 VER3.2 继续训练"实验 (lr 1e-4 混合/纯合成/lr 1e-5 轻触) 都崩了真实域 recall → VER3.2RE 必须从父模型 VER3.1 重走, 不能 resume VER3.2.
+
+### 新工具 (2026-08-08)
+- 	rain/eval_val_worker_v3.py: MAESTRO val note 级评测子进程, 口径与 bench_maestro_model.py 一致 (60s 段, onset±50ms, pitch±50cents), 额外输出 offset F1 / 按音区 P-R-F1 / 错误归因 (TP/miss/fp) / onset 偏差 / 时长分布. 与训练进程隔离, 防 val 拖死训练.
+- 	rain/train_v32re.py: VER3.2RE 训练脚本, 每 epoch JSONL 记录 (train loss 分量/frame_acc/onset P-R-F1/grad_norm/步速/显存 + note 级全量指标), 按 note_f1 保存 best, 自动 early-stop.
+- 	rain/watch_v32re.ps1: 20 分钟兜底 watchdog (进程消失/日志停滞/NaN/note_f1 塌陷).
+
+### 启动前基线 (全部 MAESTRO val 137 首 / 1100 段, 比 8/7 的 70 首更全)
+| 模型 | note P | note R | note F1 | miss率 | fp率 | onset中位偏差 |
+|---|---|---|---|---|---|---|
+| VER3.1_MultiTimbre (起点) | 0.7373 | 0.5153 | **0.5945** | — | — | — |
+| VER3.2_Enhanced (对照) | 0.7476 | 0.6757 | **0.7023** | 0.360 | 0.240 | 10.8ms |
+
+→ VER3.2 当初那几步高音加权把 recall +0.16, precision 还略升 —— 这就是 VER3.2 配方被复现的原因.
+
+### VER3.2RE 训练配置 (2026-08-08 22:02 启动, PID 见 train/train_v32re.pid)
+- 起点: model/VER3.1_MultiTimbre.pth (父模型)
+- 数据: 10852 合成 (programs 0/4 多音色, 30s) + 18678 MAESTRO 段 (30s), 1:1 混合
+- 优化: Adam lr 1e-4, batch 8, workers 2, clip 3.0, 50 epochs
+- 损失: onset_weight=5, 高音区 (MIDI>=72) frame×2 / onset×2, 无在线增强
+- 验证: 每 epoch MAESTRO val note 级 (137 首), best 按 note_f1 存 VER3.2RE_best_note.pth
+- 日志: train/log_v32re.log + train/metrics_v32re.jsonl (逐 epoch 全量对比数据)
+- 产物: model/VER3.2RE.pth / _best_note.pth / _latest.pt
+- 注意: VER3.2_Enhanced.pth 不动, 仍是活动模型
+
+### 22:21-22:31 — 训练进程被 watchdog 误杀 + 修复 (重要)
+- 现象: 22:21:55 step 1600 后进程消失, 无 traceback; watchdog 日志显示 22:22:05 "检测到 NaN/Inf, 终止训练".
+- 根因: watch_v32re.ps1 v1 用 -match 'nan|NaN|inf|-inf', PowerShell 的 -match 默认忽略大小写,
+  日志每行都含 [INFO], 其中 "inf" 被当成 NaN/Inf 误报 → 第一次巡检就杀掉训练.
+- 损失: epoch1 前 1600 步 (~20 分钟), 无检查点 (原脚本只在 epoch 结束保存).
+- 修复:
+  1. watchdog v2: NaN 检测改 -cmatch '\b(nan|inf)\b' (大小写敏感+词边界);
+  2. train_v32re.py: 每 500 步存 latest.pt (含 optimizer/best 状态), 崩溃最多丢 ~5 分钟;
+  3. watchdog v2: 进程消失且无 DONE → 自动重启 (最多 3 次, resume latest.pt);
+  4. watchdog v2: 训练正常结束 → 健康检查 (note_f1 平台期/下跌判定) → 50 轮后自动续训至 100 轮;
+  5. train_v32re.py: 结束标记 DONE reason=complete/collapse/plateau + last_epoch, 供 watchdog 判断;
+  6. train_v32re.py: 平台期提前停止 (min 15 轮后, note_f1 连续 10 轮未创新高即停).
+- 重启: 22:29:47 从 VER3.1_MultiTimbre 重新开始 (PID 56684), watchdog v2 同时在线.
+
+### 22:57 — Epoch 1 note 级结果 + 预警
+- Epoch 1: note_f1=**0.4780** (P 0.6573 / R 0.3857), offset_f1=0.0468, miss 64.1%, fp 31.5%.
+- 对比: VER3.1 起点 0.5945, VER3.2 0.7023 → **1 轮混合训练后真实域 recall 明显回落**, 与 8/7 观察到的"混合 1:1 训练破坏真实域 recall"一致.
+- 可能原因: 我们的复现配方 (onset×5 + 高音 frame/onset×2, lr1e-4, 30s 混合 1:1) 与当年 VER3.2 实际参数不一致 (当年高音加权实现未提交).
+- 已加地板保护: note_f1 < 0.55 连续 3 轮 (且 ≥4 轮) 自动停止, 避免训废.
+- 观察计划: epoch 2-3 若回升 ≥0.60 则继续; 否则按地板保护停, 保留 VER3.2_Enhanced 为活动模型, 回退后重新讨论配方.
+
+### 23:18-23:23 — 第一配方判定失败, 启动 VER3.2RE_L1 低学习率实验
+- Epoch 2 note_f1=0.4307 (R 0.3477), 连续两轮下跌 (0.5945→0.4780→0.4307) → 判定 lr1e-4+混合1:1 配方复现失败 (与 8/7 结论一致), 23:18 手动终止 (PID 56684).
+- 失败原因假设: 当年 VER3.2 的高音加权实现/训练参数未提交, 无法精确复现; lr1e-4 混合训练对真实域 recall 破坏性太强.
+- L1 实验 (23:23 启动, PID 59320): 从 VER3.1 出发, **lr 2e-5 + 冻结 BN + 高音区 frame×4/onset×2 + onset 权重降到 2**, 混合数据不变, 15 epochs 封顶, 地板 0.55 (ep4 起生效), 平台期 patience 6.
+- 决策规则: epoch1-2 note_f1 ≥0.55 且上升 → 继续; 若 3 轮低于 0.55 → 自动停; 15 轮内无新高 → 平台期停. 失败则保留 VER3.2_Enhanced 为活动模型, 转 BP 解码阈值扫描 (后处理, 无训练风险).
+
+## 2026-08-09 早上 — 蓝屏事故复盘 + L1 失败 + L2 纯真实微调启动
+
+### 昨晚发生了什么
+- 23:58 L1 epoch2 训练完成, note 级验证进行中; **00:02 机器蓝屏 (BugCheck 0x50 PAGE_FAULT_IN_NONPAGED_AREA)**, 系统重启, 训练与 watchdog 全部消失.
+- 08:20 恢复会话后确认: L1 无外部进程, 事件日志确认蓝屏. 不是训练本身的问题.
+
+### L1 (混合数据低学习率) 结论: 失败
+- L1 epoch1 note_f1=0.4561, epoch2 检查点复测=0.4554 (P 0.623/R 0.369) → 完全卡死在 VER3.1 基线 (0.5945) 以下.
+- 佐证 8/7 结论: 从 VER3.x 继续训练 (无论 lr/BN/权重) 都会破坏真实域 recall; 当年 VER3.2 的参数未提交, 无法精确复现.
+- L1 检查点保留: model/VER3.2RE_L1_best_note.pth (0.456), 不启用.
+
+### L2 实验 (进行中, 08:34 启动, PID 33936)
+- 假设: 8/7 只试过混合/纯合成/轻触, **纯 MAESTRO 真实域微调从未试过**; VER3.0 时期真实域训练确实拉高过 recall.
+- 配置: 从 VER3.2_Enhanced (0.7023) 出发, data_mode=real (18678 段), lr 1e-5, 冻结 BN, 高音 frame×2, onset 权重 1, 8 epochs 封顶, floor 0.65 (ep4 起), plateau patience 5.
+- 停止条件: note_f1<0.65 连续3轮 / 平台期 / 8 轮完成. 失败则保留 VER3.2_Enhanced 为活动模型, 转 BP 解码阈值扫描 (后处理, 无风险).
+- 备注: watchdog 因沙箱权限未能拉起 (Start-Process/WScript/schtasks 均被拒), 由训练脚本内置保护 + 本会话人工盯梢兜底.
+
+### 09:00-09:20 — 用户决策: 用 se/ver3.4 代码 + VER3.1 起点重训
+- git 考古结论: VER3.2 的"高音加权"本地改动从未提交 (分支/reflog/悬空对象/PS历史/会话记录全查过), 无法精确复现.
+- 用户确认: "3.1和3.2差不多, 直接拿3.1的就行了"; "用 se/ver3.4 的那次提交的代码就行了, 那次就是最好的".
+- se/ver3.4 = 4594742 (8/5, "加入真实数据训练"), 即 VER3.0 时代代码: 纯原声钢琴合成(program 0) + MAESTRO 混合 1:1, onset-weight 5 / dilate 0, lr 1e-4, 30s 段, 无增强无加权.
+- 准备:
+  - git worktree add D:\program_project\MUSE\legacy_se34 se/ver3.4 — 原版代码独立工作区, 不动当前仓库.
+  - model/VER3.1_MultiTimbre_wrap.pt — VER3.1 纯权重包装成 legacy latest.pt 格式 (含 fresh Adam, epoch=0).
+  - 目标产物: VER3.5_Se34.pth / _best.pth / _latest.pt (写入当前 model/).
+- 训练命令 (用户手动执行, 沙箱无法拉起后台进程):
+  python -u D:\program_project\MUSE\legacy_se34\score_extraction\train\train_overnight.py --resume D:\program_project\MUSE\score_extraction\model\VER3.1_MultiTimbre_wrap.pt --epochs 50 --lr 1e-4 --save VER3.5_Se34 --workers 2 --onset-weight 5 --onset-dilate 0
+- 监控方案: 每 epoch 结束后用 eval_val_worker_v3.py 对 VER3.5_Se34_latest.pt 跑 MAESTRO val note 级评测; 若 F1 掉到 VER3.1 基线 (0.5945) 以下 0.05 且持续 2-3 轮 → 建议停止, 保留 best.
