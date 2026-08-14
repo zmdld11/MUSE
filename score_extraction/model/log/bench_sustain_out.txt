@@ -1,0 +1,13 @@
+step 5: avg5=518 ms
+step 10: avg5=519 ms
+step 15: avg5=519 ms
+step 20: avg5=520 ms
+step 25: avg5=520 ms
+step 30: avg5=519 ms
+step 35: avg5=520 ms
+step 40: avg5=520 ms
+step 45: avg5=520 ms
+step 50: avg5=520 ms
+step 55: avg5=521 ms
+step 60: avg5=521 ms
+steady avg=520 ms

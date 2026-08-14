@@ -12,7 +12,7 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 from src.pipeline import run_pipeline
 
-MUSIC = r"D:\program_project\MUSE\music"
+MUSIC = os.path.join(os.path.dirname(__file__), "music")
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 
 run_pipeline(

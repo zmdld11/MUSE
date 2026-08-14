@@ -2,7 +2,7 @@
 import os
 import pretty_midi
 
-SRC = r"d:\program_project\MUSE\music\夜の向日葵 - 松本文紀.txt"
+SRC = os.path.join(os.path.dirname(__file__), "music", "夜の向日葵 - 松本文紀.txt")
 OUT = r"d:\program_project\MUSE\score_extraction\output\himawari_reference"
 
 # C_Scale[octave][note_idx], matching C++: default lvl=3 → C4=60

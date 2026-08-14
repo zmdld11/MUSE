@@ -2,7 +2,7 @@ import os
 
 class Config:
     def __init__(self):
-        self.WORKSPACE_DIR = r"D:\program_project\MUSE\score_extraction"
+        self.WORKSPACE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.OUTPUT_DIR = os.path.join(self.WORKSPACE_DIR, "output")
         self.MODEL_DIR = os.path.join(self.WORKSPACE_DIR, "model")
         self.DEMUCS_MODEL = "htdemucs_6s"
