@@ -1,4 +1,4 @@
-﻿"""Layer 2: VER2.0 — uses our trained OnsetsAndFrames bootstrap model."""
+"""Layer 2: VER2.0 — uses our trained OnsetsAndFrames bootstrap model."""
 import logging
 import os
 
@@ -33,10 +33,10 @@ def _load_model():
         logger.info("V4 Transformer model detected")
     else:
         from train.model import OnsetsAndFrames
-        _model = OnsetsAndFrames(n_mels=229, n_midi=88)
-        logger.info("VER2/3 LSTM model detected")
+        has_offset = any(k.startswith("offset_head.") for k in state)
+        _model = OnsetsAndFrames(n_mels=229, n_midi=88, include_offset=has_offset)
+        logger.info(f"VER2/3 LSTM model detected (offset_head={has_offset})")
     _model.load_state_dict(state)
-    _model.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=True))
     _model.eval()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     _model.to(device)
@@ -91,8 +91,13 @@ def _ours_inference(model, audio_path: str) -> dict:
             pred = model(spec)
         onset = pred["onset"].squeeze(0).cpu().numpy()
         frame = pred["frame"].squeeze(0).cpu().numpy()
-    logger.info(f"Our model: onset={onset.shape}, frame={frame.shape}")
-    return {"onset_probs": onset, "frame_probs": frame, "contour": np.zeros((onset.shape[0], 264), dtype=np.float32), "sr": 22050, "hop_length": 512}
+        offset = (pred["offset"].squeeze(0).cpu().numpy()
+                  if model.include_offset else None)
+    logger.info(f"Our model: onset={onset.shape}, frame={frame.shape}, offset={None if offset is None else offset.shape}")
+    result = {"onset_probs": onset, "frame_probs": frame, "contour": np.zeros((onset.shape[0], 264), dtype=np.float32), "sr": 22050, "hop_length": 512}
+    if offset is not None:
+        result["offset_probs"] = offset
+    return result
 
 def _basic_pitch_inference(audio_path: str) -> dict:
     try:

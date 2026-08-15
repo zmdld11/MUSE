@@ -1141,3 +1141,28 @@ MAESTRO val 20 首: R=0.333 (基线 0.614)
 - ???????? (?????/canon) ??.
 - offset ????????? (pipeline.py), ????????.
 - ??????? offset: ??? backbone ??????/? lr ??, ?? Kong CRNN ??????.
+
+## 2026-08-15 — Onset-first 回归实验
+
+### 关键结论
+- 用户听感定义明确：缺少攻击音头即视为漏音。后续主指标改为 onset precision/recall/F1@50ms。
+- 夜之向日葵 nofilter 基线：GT 843、候选 772、宽松命中 533、漏 310、多 239；匹配音头中位偏差约 74ms。
+- 三输入对照显示 Wiener 伤害瞬态：原始混音 strict F1 0.169，Demucs 直出 0.251，Demucs+Wiener 0.204。
+- Demucs 直出 + BP frame threshold 0.35 是当前更优配置；手写 soft_score 和强 harmonic refine 均会优先杀真音头，暂不进入正式路径。
+
+### 正式管线改动
+- config.py 新增：PIANO_USE_WIENER=False、BP_FRAME_THRESHOLD=0.35、HARD_ECHO_FILTER=False、MIN_NOTE_DURATION=0.10。
+- pipeline.py：钢琴默认直接使用 Demucs piano stem；撤掉低 onset_prob + 低 confidence 硬过滤；所有候选音头保留；最短 release 100ms；同音下一 onset 前 8ms 截止。
+- transcriber.py：自动识别 VER4.1 offset_head，并输出 offset_probs。
+- frame_post.py：BP frame 阈值改为可配置。
+
+### 输出
+- output/VER4.1_OnsetFirst_himawari/piano.mid：692 notes，median duration 279ms，无负时长/同音重叠。
+- output/VER4.1_OnsetFirst_canon/piano.mid：1725 notes，median duration 299ms，无负时长/同音重叠。
+- 两个 MusicXML 均通过 music21.converter.parse()。
+- 夜之向日葵新正式输出 strict onset F1=0.276（上一正式版约 0.204）。
+
+### 下一步
+- 试听确认：夜之向日葵是否不再空洞；Canon 快节奏是否仍保留丰富度且不再过度打鞭炮。
+- 若听感方向正确，训练 onset verifier 替代手写 soft_score。
+- 复测 Demucs 输出随机性：同一音频两次分轨候选差异 693 vs 758，需要固定 random seed 或缓存分轨结果。

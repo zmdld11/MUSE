@@ -80,6 +80,51 @@ def _write_pretty_midi(notes: list[dict], midi_path: str, bpm: float,
     pm.write(midi_path)
 
 
+
+def _adjust_offsets_with_model(candidates: list[dict], offset_probs: np.ndarray | None,
+                       hop_length: int, sr: int) -> list[dict]:
+    """Use the VER4.1 offset head to shorten over-long BP candidates."""
+    if offset_probs is None or len(candidates) == 0:
+        return candidates
+
+    adjusted = 0
+    for c in candidates:
+        onset = float(c.get("onset_time", c["onset_frame"] * hop_length / sr))
+        offset = float(c.get("offset_time", c["offset_frame"] * hop_length / sr))
+        pitch_bin = int(c.get("pitch_bin", int(c["pitch"]) - 21))
+        start_f = max(0, int(onset * sr / hop_length))
+        end_f = min(offset_probs.shape[0] - 1, int(offset * sr / hop_length) + 1)
+        if end_f <= start_f or not (0 <= pitch_bin < offset_probs.shape[1]):
+            continue
+        segment = offset_probs[start_f:end_f + 1, pitch_bin]
+        if segment.size == 0 or float(segment.max()) < 0.2:
+            continue
+        peak_f = start_f + int(segment.argmax())
+        model_offset = peak_f * hop_length / sr
+        new_offset = min(max(model_offset, onset + 0.03), offset + 0.35)
+        if abs(new_offset - offset) > 1e-6:
+            c["offset_time"] = float(new_offset)
+            adjusted += 1
+    logger.info(f"  Model offset adjustment: {adjusted}/{len(candidates)} notes")
+    return candidates
+
+
+def _enforce_release_limits(notes: list[dict], min_duration: float) -> list[dict]:
+    """Preserve attacks while preventing impossible same-pitch overlaps."""
+    by_pitch = {}
+    for n in notes:
+        by_pitch.setdefault(n["pitch"], []).append(n)
+    for group in by_pitch.values():
+        group.sort(key=lambda n: n["onset"])
+        for i, n in enumerate(group):
+            wanted = n["offset"] - n["onset"]
+            if wanted < min_duration:
+                n["offset"] = n["onset"] + min_duration
+            if i + 1 < len(group):
+                n["offset"] = min(n["offset"], group[i + 1]["onset"] - 0.008)
+            n["offset"] = max(n["onset"] + 0.023, n["offset"])
+    return notes
+
 def _process_instrument(audio_path: str, inst_name: str, bpm: float,
                         output_dir: str,
                         chords: list[dict] | None = None) -> bool:
@@ -101,6 +146,10 @@ def _process_instrument(audio_path: str, inst_name: str, bpm: float,
         result["frame_probs"],
         hop_length=model_hop,
         sr=model_sr,
+        frame_threshold=config.BP_FRAME_THRESHOLD,
+    )
+    candidates = _adjust_offsets_with_model(
+        candidates, result.get("offset_probs"), model_hop, model_sr
     )
     if len(candidates) == 0:
         logger.warning(f"  [{inst_name}] No candidates after frame post-processing")
@@ -120,8 +169,8 @@ def _process_instrument(audio_path: str, inst_name: str, bpm: float,
         "pitch": c["pitch"],
         "confidence": c["confidence"],
         "amplitude": 0.1,
-    } for c in candidates
-        if not (c.get("onset_prob", 1.0) < 0.15 and c["confidence"] < 0.5)]
+    } for c in candidates]
+    notes = _enforce_release_limits(notes, config.MIN_NOTE_DURATION)
     if len(notes) == 0:
         logger.warning(f"  [{inst_name}] No notes after refinement")
         return False
@@ -244,7 +293,7 @@ def run_pipeline(audio_path: str, output_dir: str | None = None) -> str:
         # Piano: VER2.4 (2026-08-02) — 用钢琴轨而非原音频, 并 wiener 降噪.
         # A/B 证明: 原音频有鼓/贝斯/人声串扰, 分离钢琴轨的 demucs 雪花会抖模型输入;
         # 钢琴轨+wiener 真实录音 F1 0.46→0.63 (弱音过滤组合后 0.65).
-        if inst_name == "piano":
+        if inst_name == "piano" and config.PIANO_USE_WIENER:
             from scipy.signal import wiener
             import scipy.io.wavfile as _wf
             audio, _sr = librosa.load(wav_path, sr=config.SR, mono=True)

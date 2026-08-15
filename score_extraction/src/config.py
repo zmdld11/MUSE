@@ -24,6 +24,11 @@ class Config:
         # 2026-08-02: 钢琴曲只转录 piano (跳过 bass/guitar/vocals 等不适配轨道,
         # 也跳过 source separation — piano 直接用原始音频)
         self.ONLY_PIANO = True
+        # 2026-08-15 onset-first experiment: preserve attacks, avoid transient-smoothing
+        self.PIANO_USE_WIENER = False
+        self.BP_FRAME_THRESHOLD = 0.35
+        self.HARD_ECHO_FILTER = False
+        self.MIN_NOTE_DURATION = 0.10
         os.makedirs(self.OUTPUT_DIR, exist_ok=True)
         os.makedirs(self.MODEL_DIR, exist_ok=True)
 
