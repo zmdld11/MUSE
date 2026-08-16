@@ -325,6 +325,7 @@ def process_frames(onset_probs: np.ndarray, frame_probs: np.ndarray,
                    binarize_threshold: float = None,
                    threshold_cap: float = None,
                    frame_threshold: float = None,
+                   onset_threshold: float = None,
                    binarize_mode: str = "adaptive") -> list[dict]:
     """
     Full frame-level post-processing pipeline.
@@ -347,6 +348,7 @@ def process_frames(onset_probs: np.ndarray, frame_probs: np.ndarray,
     # VER2.3: 默认走 basic-pitch 官方后处理
     if binarize_mode != "legacy":
         return process_frames_bp(onset_probs, frame_probs, hop_length, sr,
+                                  onset_thresh=onset_threshold if onset_threshold is not None else config.BP_ONSET_THRESHOLD,
                                   frame_thresh=frame_threshold if frame_threshold is not None else config.BP_FRAME_THRESHOLD)
 
     # ===== 旧逻辑 (legacy, 保留参考) =====

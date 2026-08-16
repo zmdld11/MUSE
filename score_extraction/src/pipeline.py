@@ -147,10 +147,12 @@ def _process_instrument(audio_path: str, inst_name: str, bpm: float,
         hop_length=model_hop,
         sr=model_sr,
         frame_threshold=config.BP_FRAME_THRESHOLD,
+        onset_threshold=config.BP_ONSET_THRESHOLD,
     )
-    candidates = _adjust_offsets_with_model(
-        candidates, result.get("offset_probs"), model_hop, model_sr
-    )
+    if config.PIANO_USE_MODEL_OFFSET:
+        candidates = _adjust_offsets_with_model(
+            candidates, result.get("offset_probs"), model_hop, model_sr
+        )
     if len(candidates) == 0:
         logger.warning(f"  [{inst_name}] No candidates after frame post-processing")
         return False

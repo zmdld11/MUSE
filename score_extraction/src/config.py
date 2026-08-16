@@ -26,7 +26,10 @@ class Config:
         self.ONLY_PIANO = True
         # 2026-08-15 onset-first experiment: preserve attacks, avoid transient-smoothing
         self.PIANO_USE_WIENER = False
-        self.BP_FRAME_THRESHOLD = 0.35
+        # VER4.2: offset head currently truncates valid sustains; disable by default.
+        self.PIANO_USE_MODEL_OFFSET = False
+        self.BP_ONSET_THRESHOLD = 0.65
+        self.BP_FRAME_THRESHOLD = 0.25
         self.HARD_ECHO_FILTER = False
         self.MIN_NOTE_DURATION = 0.10
         os.makedirs(self.OUTPUT_DIR, exist_ok=True)
