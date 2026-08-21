@@ -1,0 +1,87 @@
+{
+  "model": "VER6.0_HighResolution",
+  "checkpoint": "model/VER6.0_HR_Diverse3848_R2_best_val.pth",
+  "checkpoint_epoch": 12,
+  "split": "validation",
+  "segments": 148,
+  "segment_seconds": 30,
+  "decode": {
+    "onset_threshold": 0.875,
+    "frame_threshold": 0.25,
+    "offset_threshold": 0.35,
+    "pedal_onset_threshold": 0.5,
+    "pedal_offset_threshold": 0.5
+  },
+  "velocity_tolerance": 10,
+  "elapsed_s": 15.5,
+  "micro": {
+    "sounding_onset": {
+      "precision": 0.789328,
+      "recall": 0.49142,
+      "f1": 0.605726,
+      "tp": 17411,
+      "n_ref": 35430,
+      "n_est": 22058
+    },
+    "sounding_offset": {
+      "precision": 0.221688,
+      "recall": 0.138019,
+      "f1": 0.170122,
+      "tp": 4890,
+      "n_ref": 35430,
+      "n_est": 22058
+    },
+    "raw_offset": {
+      "precision": 0.253196,
+      "recall": 0.157635,
+      "f1": 0.194301,
+      "tp": 5585,
+      "n_ref": 35430,
+      "n_est": 22058
+    },
+    "velocity": {
+      "precision": 0.147792,
+      "recall": 0.092012,
+      "f1": 0.113415,
+      "tp": 3260,
+      "n_ref": 35430,
+      "n_est": 22058
+    },
+    "pedal_onset": {
+      "precision": 0.215884,
+      "recall": 0.291404,
+      "f1": 0.248023,
+      "tp": 878,
+      "n_ref": 3013,
+      "n_est": 4067
+    },
+    "pedal_offset": {
+      "precision": 0.081387,
+      "recall": 0.109857,
+      "f1": 0.093503,
+      "tp": 331,
+      "n_ref": 3013,
+      "n_est": 4067
+    }
+  },
+  "macro_f1": {
+    "sounding_onset": 0.548495,
+    "sounding_offset": 0.136502,
+    "raw_offset": 0.158802,
+    "velocity": 0.089121,
+    "pedal_onset": 0.235404,
+    "pedal_offset": 0.089673
+  },
+  "onset_error_ms": {
+    "median": -2.555,
+    "p90_abs": 18.386
+  },
+  "offset_error_ms": {
+    "median": -5.187,
+    "p90_abs": 47.156
+  },
+  "duration_error_ms": {
+    "median": -2.053,
+    "p90_abs": 49.982
+  }
+}

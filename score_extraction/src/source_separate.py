@@ -17,6 +17,7 @@ TRACK_MAP = {
     "vocals": "vocals",
     "guitar": "guitar",
     "piano": "piano",
+    "other": "other",
 }
 
 
@@ -102,3 +103,5 @@ def separate_tracks(audio_path: str, output_dir: str) -> dict[str, str]:
         raise RuntimeError(f"demucs output incomplete: {list(tracks.keys())}")
 
     return tracks
+
+

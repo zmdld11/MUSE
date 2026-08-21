@@ -2,7 +2,80 @@
 
 > 乐谱生成（score_extraction）开发记录
 
+## 模型版本总览（review 索引）
+
+> 更新：2026-08-16。表中 `note_f1` 默认指 onset±50ms 且音高匹配的音符级 F1；但合成 40 首、MAESTRO validation、真实录音弱参考、Canon/夜之向日葵人工 GT 的数据集和时间轴口径不同，**不能只按数字横向排序**。
+
+### 自研模型 / 管线版本
+
+| 模型或版本 | 特点 | 代表性能 | 结论与用途 |
+|---|---|---|---|
+| VER1.0_BasicPipeline | basic-pitch 黑盒 note events + demucs/CREPE + 初版 MusicXML 组装 | 无统一可信 note_f1；Canon basic-pitch 直出约 6000 音，噪声淹没 | 只算链路打通；证明不能把 transcription 当纯可视化问题。 |
+| VER2.0_Bootstrap | 自研 OaF：harmonic stack + CNN + BiLSTM，onset/frame 双头；GiantMIDI/FluidSynth 训练 | 训练 onset_f1 0.853；旧后处理 note_f1 0.294，换 BP 官方后处理 **0.740** | 关键转折：早期瓶颈在后处理而非模型；合成域可用，真实域仍弱。 |
+| VER2.2_BootstrapFull | VER2.0 架构全量再训 50 epoch | onset_f1 升至 0.939，但旧管线 note_f1 降到 0.240 | 证明“训练更久”不解决下游；后来被 BP 后处理路线取代。 |
+| VER2.4_RealPipe | VER2.0 + Demucs piano stem + Wiener/弱回声过滤 | 夜之向日葵 E 大调弱参考 F1 约 0.65 | 真实录音噪声明显下降；但也证明手写过滤容易误杀音头。 |
+| VER3.0_MixedReal | GiantMIDI 合成 + MAESTRO 真实混合课程训练 | MAESTRO frame/probe F1约0.16；夜之向日葵 MIDI 闭环 note_f1 **0.973** | 真实域开始能学，合成 MIDI 近乎满分；确立混合数据路线。 |
+| VER3.1_MultiTimbre | VER3.0 后加入 program 0/4 钢琴/电钢音色混合 | MAESTRO val note_f1 约 **0.5945** | 音色泛化改善，成为后续 VER3.2/VER4.1 的常用父模型。 |
+| VER3.2_Enhanced | VER3.1 后短程高音区加权；具体配方未完整提交 | MAESTRO 70首/428段 note_f1 **0.668**；20首复测口径最高约 **0.7023** | 长期内部最优 LSTM；高音延音稳定，但真实录音仍有多检/碎音。 |
+| VER3.3 / VER3.4 / VER3.2RE | 低音加权、增强、轻触微调、复现 VER3.2 等实验 | note_f1 多落在 0.35-0.50，真实 recall 崩溃 | 全部存档不启用；证明从 VER3.2 继续微调是极敏感平衡点问题。 |
+| VER4.0_Transformer | 从零 ResBlock + Transformer，2.05M 参数，三头 | 20 epoch best note_f1 **0.150**，precision约0.09 | 训练配方失败：稀疏 onset 未加权时退化为全 0；不能证明 Transformer 本身不行。 |
+| VER4.1_Offset_v8 | VER3.1/LSTM 谱系 + offset head | note_f1 0.5159 不变，offset_f1 0.059→**0.139** | offset 有统计收益，但会把 sustain 提前截断；正式管线默认关闭。 |
+| VER4.2_Balanced | onset/frame 表达再平衡；no-offset 解码 | MAESTRO 30首 onset0.65/frame0.25：P 0.580 / R 0.344 / F1 **0.4235** | 比 4.1 更稳，但真实听感仍偏短、音头偏多。 |
+| VER4.2_FrameFirst | 从 Balanced 出发冻结深干，只训 onset/frame heads | note_f1 **0.4350**；Canon 2050音/median 580ms | 客观小涨但听感 onset 错位、快段变脏；不作为主线继续微调。 |
+| VER5.0_OnsetShift_Real | 冻结 VER4.2 全部旧头，仅训 77,016 参数 onset-shift head，做亚帧音头精修 | EP1-5 shift MAE 5.77→5.74ms，但 refined onset25 稳定在0.234-0.236 < baseline 0.2947，note约0.379 < baseline 0.4214；EP5自动停止且无best | 实验失败但定位清晰：BP候选帧与帧级shift标签坐标系不一致；下一版应做候选级校准或ByteDance教师标签。 |
+| VER5.1_CandidateCalibrator_A | 以BP候选为原点的67维局部posterior特征，MLP同时预测keep与±80ms onset校准 | MAESTRO val300 onset25 0.4868→**0.6971**，onset50 0.6004→**0.7250**，median 12.48→**5.49ms**；同口径150段最佳0.6392/0.6743 | 候选级坐标系有效；但真实Demucs域迁移有限，夜之向日葵@50 0.3365→0.3574。 |
+| VER5.1_CandidateCalibrator_B | ByteDance HR教师候选 + 同一套候选校调器 | 同口径150段教师baseline onset25 **0.9656** / onset50 **0.9712**；校准仅0.9658 | 教师候选已接近上限；应作为VER6学生模型/候选生成层教师，而非继续小修。 |
+| VER6.0_HR_Diverse3848_R2 | VER4.2 backbone + sounding offset、亚帧残差、velocity、pedal与三角回归头；全962首/3806段训练12epoch | MAESTRO val150、onset@0.825：P/R/F1=0.6978/0.5998/**0.6451**；sounding offset F1 **0.1676**；raw offset **0.2127**；pedal onset **0.2480** | 当前自有VER6最优；证明坐标/标签闭环正确，但候选生成与容量仍远弱于ByteDance HR。 |
+
+### 外部基线 / 教师
+
+| 模型 | 特点 | 代表性能 | 结论与用途 |
+|---|---|---|---|
+| basic-pitch 官方模型 | 预训练 lightweight model；官方逐音高 onset 峰值 + melodia 解码 | 合成40首 BP 后处理 note_f1 **0.691** | 重要后处理教师；早期自研管线大量借鉴其解码。 |
+| ByteDance/Kong HR Piano | 高分辨率钢琴转录，直接回归 onset/offset 时间并解析亚帧时间；本地评测使用 pedal-aware sounding duration | 官方 checkpoint note_f1=0.9677；本地 MAESTRO val 150段 onset F1 **0.966487**、onset+offset F1 **0.862182** | 用户听感接近成品；当前最适合做 VER6 的强基线、onset/offset 教师与候选生成器。 |
+
 ---
+
+## 2026-08-18 — ByteDance接入与东方之空吉他zero-shot
+
+- Route A：新增ByteDance HR统一前端，piano pipeline默认事件直通并保留CC64 pedal；Canon冒烟输出2278 notes、384个CC64，MusicXML可解析。
+- Route B试点：解析用户GP8文件`東の空から始まる世界.gp`，展开661个note-on、111小节、156.706s；全部满足`pitch=tuning[string]+fret`。
+- GP内嵌音频170.693s；完整FLAC241.307s。互相关显示完整曲70.5887s处对应GP参考0s。
+- Demucs完整分轨并保存guitar/other；other参考段RMS仅0.00281，吉他主要在guitar stem。
+- ByteDance干净内嵌音频zero-shot：任意音高onset@50 F1 **0.3339**，严格note@50 F1 **0.0694**，onset+offset F1 **0.0255**。
+- ByteDance Demucs guitar stem：任意音高onset@50 F1 **0.1597**，严格note@50 F1 **0.0440**。
+- basic-pitch同stem对照：任意音高onset@50 F1 **0.3623**，严格note@50 F1 **0.0882**。
+- 半音sweep排除整体移调；错误主要来自吉他谐波/泛音与音色域差。
+- 结论：ByteDance不能直接迁移为guitar frontend；Route B应进入GuitarSet/GP数据微调或专用模型阶段。
+## 2026-08-18 — 项目切换为双主线
+
+- 路线 A：以 ByteDance/Kong HR 为钢琴事件前端，研究事件到乐谱的记谱层，并提出自有 notation-level 指标。
+- 路线 B：研究 guitar 乐谱识别，从数据盘点与 zero-shot 开始，最终以统一事件 schema 接入同一记谱后端，输出五线谱与 TAB。
+- VER6.0 保留为自研 ablation / student / license 备份；不再把继续追赶 ByteDance 钢琴 AMT 性能作为当前主目标。
+- 双主线共享 event schema、notation backend、MusicXML 导出和记谱指标；生成输出不依赖 GT。
+## 2026-08-18 — VER6.0 R1/R2 服务器训练
+
+- R1 `VER6.0_HR_Head2400_R1B`：2400段覆盖200首，EP5 val loss 9.8589后连续上升，EP8停止；150段 onset/sounding offset F1=0.6355/0.1543。
+- R2 `VER6.0_HR_Diverse3848_R2`：全962首、每首4段共3806段，head lr 3e-4；12 epoch val loss持续降至9.1475，无过拟合。
+- R2 EP12在150段、onset阈值0.825下：onset P/R/F1=0.697807/0.599802/**0.645104**；sounding offset F1 **0.167628**；raw offset F1 **0.212707**；velocity F1 0.111074；pedal onset/offset F1 **0.248023/0.093503**。
+- onset/offset误差：onset median/p90_abs=-2.490/21.351ms；offset=-5.423/46.546ms。0.85只给offset带来+0.00265却让onset下降0.01364，因此默认选0.825。
+- 结论：多样性和低学习率有效；下一瓶颈是候选生成与模型容量，而非GT语义或残差坐标系。
+## 2026-08-18 — VER6.0 自有高分辨率模型最小闭环
+
+- 新增 `train/high_resolution.py`：不重建 mel 缓存，在旁路生成 `.hr_v1.npz` 稀疏事件 companion，并在线构建 onset、pedal-aware sounding frame、sounding offset、raw offset、velocity、pedal 与三角回归目标。
+- 新增 `train/model_v6.py`：复用 VER4.2 LSTM backbone，新增 12 类高分辨率输出；checkpoint 旧骨干可加载、新头冷启动，版本独立命名。
+- 新增 `train/train_high_resolution_v6.py` 与 `eval/high_resolution_v6.py`：支持冻结 backbone、分离旧头学习率、事件级 sounding/raw 双语义评测。
+- 完美 posterior 自测 414/414 note、32/32 pedal 全部还原；2-step 训练与16段小训练均通过。
+- 16段×2epoch 后 20段事件评测：onset F1 0.422346，sounding offset F1 0.083958，raw offset F1 0.136632；显存157MB。小样本不足以训练 pedal/velocity，服务器正式训练后再评估上限。
+- dyylab SSH 当前超时，正式训练尚未启动。
+## 2026-08-17 — VER6.0 offset 基线口径修正
+
+- 确认 ByteDance 论文评测使用 `TargetProcessor(..., extend_pedal=True)`：note-off 在踏板内时延伸到踏板释放，同踏板同音重按时前音截到新音 onset。
+- `eval/bytedance_offset_baseline.py` 新增 `--gt-duration raw|pedal-aware`，note micro 指标改为严格音高匹配。
+- MAESTRO validation 20 段 A/B：onset F1 0.961172；onset+offset F1 raw 0.084217 → pedal-aware **0.838237**；offset p90 130.334ms → 23.578ms。此前低 offset 分数是 GT 语义错位，不是官方模型失败。
+- 后续 VER6.0 指标同时报告两类语义：论文对齐用 pedal-aware sounding duration；产品输出用 raw note-off + sustain pedal CC64。
+- 归因：20 段 4,649 个 GT 音符中 4,248 个（91.37%）被踏板延长，延长量 median 416.667ms / p90 1261.719ms。
+- 150 段复核：35,873 个 GT 音符下 note onset F1 **0.966487**，onset+offset F1 **0.862182**，velocity F1 0.845560；offset median/p90 -2.395/24.792ms。
 
 ## 2026-07-05 — VER1.0 全链路打通 + 设计 VER2.0
 
@@ -1166,3 +1239,7 @@ MAESTRO val 20 首: R=0.333 (基线 0.614)
 - 试听确认：夜之向日葵是否不再空洞；Canon 快节奏是否仍保留丰富度且不再过度打鞭炮。
 - 若听感方向正确，训练 onset verifier 替代手写 soft_score。
 - 复测 Demucs 输出随机性：同一音频两次分轨候选差异 693 vs 758，需要固定 random seed 或缓存分轨结果。
+
+
+
+

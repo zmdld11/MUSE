@@ -1,0 +1,16 @@
+ARGS {"init_ckpt": "model/VER4.2_FrameFirst_best_note.pth", "run_name": "VER6.0_HR_Diverse3848_R2", "epochs": 12, "train_files": 9999, "val_files": 75, "max_train_segments": 4000, "train_segments_per_piece": 4, "max_val_segments": 150, "val_segments_per_piece": 2, "seg": 30, "batch_size": 8, "num_workers": 4, "head_lr": 0.0003, "onset_head_lr": 3e-05, "frame_head_lr": 8e-05, "offset_head_lr": 8e-05, "backbone_lr": 1e-05, "unfreeze_backbone": false, "weight_decay": 1e-05, "max_steps": null, "seed": 42, "overwrite": false}
+DEVICE cuda trainable=705735
+DATA train=3806 val=148
+EP1 train_loss=16.58777 val_loss=11.85218 onset_f1=0.2180 offset_f1=0.0762 onset_mae=5.05ms offset_mae=5.01ms gpu=540.8MB best=11.85218@1
+EP2 train_loss=13.16344 val_loss=10.35689 onset_f1=0.1691 offset_f1=0.0947 onset_mae=4.94ms offset_mae=5.00ms gpu=540.8MB best=10.35689@2
+EP3 train_loss=11.33736 val_loss=9.72965 onset_f1=0.1536 offset_f1=0.1028 onset_mae=4.96ms offset_mae=4.96ms gpu=540.8MB best=9.72965@3
+EP4 train_loss=10.51489 val_loss=9.56548 onset_f1=0.1498 offset_f1=0.1098 onset_mae=4.85ms offset_mae=4.93ms gpu=540.8MB best=9.56548@4
+EP5 train_loss=10.24046 val_loss=9.54452 onset_f1=0.1506 offset_f1=0.1172 onset_mae=4.81ms offset_mae=4.89ms gpu=540.8MB best=9.54452@5
+EP6 train_loss=10.11784 val_loss=9.49226 onset_f1=0.1510 offset_f1=0.1185 onset_mae=4.74ms offset_mae=4.88ms gpu=540.8MB best=9.49226@6
+EP7 train_loss=10.05271 val_loss=9.43072 onset_f1=0.1507 offset_f1=0.1176 onset_mae=4.77ms offset_mae=4.85ms gpu=540.8MB best=9.43072@7
+EP8 train_loss=9.97962 val_loss=9.41522 onset_f1=0.1521 offset_f1=0.1149 onset_mae=4.74ms offset_mae=4.87ms gpu=540.8MB best=9.41522@8
+EP9 train_loss=9.91859 val_loss=9.40242 onset_f1=0.1516 offset_f1=0.1218 onset_mae=4.76ms offset_mae=4.83ms gpu=540.8MB best=9.40242@9
+EP10 train_loss=9.86622 val_loss=9.27559 onset_f1=0.1528 offset_f1=0.1229 onset_mae=4.70ms offset_mae=4.83ms gpu=540.8MB best=9.27559@10
+EP11 train_loss=9.81932 val_loss=9.20355 onset_f1=0.1536 offset_f1=0.1229 onset_mae=4.72ms offset_mae=4.84ms gpu=540.8MB best=9.20355@11
+EP12 train_loss=9.76209 val_loss=9.14748 onset_f1=0.1541 offset_f1=0.1258 onset_mae=4.71ms offset_mae=4.82ms gpu=540.8MB best=9.14748@12
+DONE best_val_loss=9.147483@12

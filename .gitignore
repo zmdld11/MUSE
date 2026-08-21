@@ -63,6 +63,7 @@ source_separation/demucs-main/
 music/
 fluid_dll/
 scoremill/
+score_extraction/external/
 
 # 项目文档 markdown 纳入版本控制 (2026-08-01)
 # docs / 汇报 / MUSENote 仅放�?*.md; MUSENote �?Obsidian 本地配置继续忽略
@@ -122,3 +123,8 @@ tensorboard/
 *.tmp
 .DS_Store
 Thumbs.db
+
+.mimosa/
+# 模型权重安全岛（2026-08-21）：checkpoints/ 全部不进库，>100MB 会被 GitHub 拒收
+score_extraction/checkpoints/
+checkpoints/

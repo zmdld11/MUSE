@@ -8,6 +8,12 @@ class Config:
         self.DEMUCS_MODEL = "htdemucs_6s"
         self.DEMUCS_MODEL_PATH = None
         self.PITCH_MODEL_PIANO = "basic-pitch"
+        # Route A frontend: bytedance uses official HR events; ours keeps legacy path.
+        self.PIANO_FRONTEND = os.environ.get("MUSE_PIANO_FRONTEND", "bytedance")
+        # Route B frontend (2026-08-21): ia-amt = anime-song/instrument-agnostic-amt
+        # Semi-CRF（MIT），guitar 检查点默认；可选 guitar_v1_5 / default 等。
+        self.GUITAR_FRONTEND = os.environ.get("MUSE_GUITAR_FRONTEND", "ia_amt")
+        self.IA_AMT_TYPE = os.environ.get("MUSE_IA_AMT_TYPE", "guitar")
         self.PITCH_MODEL_MONO = "crepe"
         self.SR = 44100
         self.MODEL_SR = 22050    # SR for our trained model (mel spectrogram input)
@@ -36,3 +42,4 @@ class Config:
         os.makedirs(self.MODEL_DIR, exist_ok=True)
 
 config = Config()
+

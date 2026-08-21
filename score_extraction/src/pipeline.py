@@ -19,6 +19,7 @@ from src.config import config
 from src.bpm_detect import detect_bpm
 from src.source_separate import separate_tracks
 from src.transcriber import transcribe
+from src.bytedance_frontend import transcribe_bytedance
 from src.frame_post import process_frames
 from src.note_post import refine_notes
 from src.quantize_timing import quantize_onsets
@@ -44,7 +45,8 @@ _INST_PROGRAMS = {
 
 def _write_pretty_midi(notes: list[dict], midi_path: str, bpm: float,
                        inst_name: str = "piano",
-                       time_sig: str = "4/4") -> None:
+                       time_sig: str = "4/4",
+                       pedal_events: list[dict] | None = None) -> None:
     """Write note list to a MIDI file via pretty_midi.
 
     Each note dict must have: onset, offset (seconds), pitch (MIDI).
@@ -67,7 +69,7 @@ def _write_pretty_midi(notes: list[dict], midi_path: str, bpm: float,
         voice_notes = [n for n in notes if n.get("voice", 1) == voice_id]
         for n in voice_notes:
             amp = n.get("amplitude", 0.1)
-            velocity = max(20, min(100, int(amp * 80 + 40)))
+            velocity = int(n.get("velocity", 0)) or max(20, min(100, int(amp * 80 + 40)))
             note = pretty_midi.Note(
                 velocity=velocity,
                 pitch=int(n["pitch"]),
@@ -77,6 +79,17 @@ def _write_pretty_midi(notes: list[dict], midi_path: str, bpm: float,
             inst.notes.append(note)
         pm.instruments.append(inst)
 
+    # ByteDance pedal events are preserved as CC64. The notation layer will
+    # convert them separately into pedal markings and notated durations.
+    if pedal_events and pm.instruments:
+        pedal_instrument = pm.instruments[0]
+        for pedal in pedal_events:
+            start = max(0.0, float(pedal["onset"]))
+            end = max(start + 0.01, float(pedal["offset"]))
+            pedal_instrument.control_changes.append(pretty_midi.ControlChange(
+                number=64, value=127, time=start))
+            pedal_instrument.control_changes.append(pretty_midi.ControlChange(
+                number=64, value=0, time=end))
     pm.write(midi_path)
 
 
@@ -129,50 +142,75 @@ def _process_instrument(audio_path: str, inst_name: str, bpm: float,
                         output_dir: str,
                         chords: list[dict] | None = None) -> bool:
     """Run Layers 2-5 on one instrument track. Returns True on success."""
-    # 输出目录用歌曲目录 (VER2.4: 钢琴轨传入降噪临时文件, 不能用文件名派生目录)
-    # Layer 2: Transcription
-    logger.info(f"  [{inst_name}] Layer 2: Transcribing...")
-    result = transcribe(audio_path)
-    if result["frame_probs"].size == 0 or result["frame_probs"].max() < 0.01:
-        logger.warning(f"  [{inst_name}] No signal detected, skipping")
-        return False
+    pedal_events: list[dict] = []
 
-    # Layer 3: Frame-level post-processing
-    logger.info(f"  [{inst_name}] Layer 3: Frame post-processing...")
-    model_sr = result.get("sr", config.SR)
-    model_hop = result.get("hop_length", config.HOP_LENGTH)
-    candidates = process_frames(
-        result["onset_probs"],
-        result["frame_probs"],
-        hop_length=model_hop,
-        sr=model_sr,
-        frame_threshold=config.BP_FRAME_THRESHOLD,
-        onset_threshold=config.BP_ONSET_THRESHOLD,
-    )
-    if config.PIANO_USE_MODEL_OFFSET:
-        candidates = _adjust_offsets_with_model(
-            candidates, result.get("offset_probs"), model_hop, model_sr
+    # Route A: ByteDance HR already emits precise note/pedal events, so piano
+    # bypasses posterior frame decoding and enters notation directly.
+    if inst_name == "piano" and config.PIANO_FRONTEND == "bytedance":
+        logger.info(f"  [{inst_name}] Layer 2: ByteDance HR frontend...")
+        frontend = transcribe_bytedance(audio_path)
+        pedal_events = frontend.get("pedal_events", [])
+        notes = [{
+            "onset": round(float(note["onset"]), 4),
+            "offset": round(float(note["offset"]), 4),
+            "pitch": int(note["pitch"]),
+            "confidence": min(1.0, float(note.get("velocity", 64)) / 127.0),
+            "velocity": max(1, min(127, int(note.get("velocity", 64)))),
+            "amplitude": 0.1,
+        } for note in frontend.get("notes", [])]
+        notes = _enforce_release_limits(notes, config.MIN_NOTE_DURATION)
+    elif inst_name == "guitar" and config.GUITAR_FRONTEND == "ia_amt":
+        # Route B (2026-08-21): ia-amt Semi-CRF 前端，事件精确（onset 中位误差
+        # 17.5ms、offset=区间端点+亚帧修正），同 Route A 直通记谱层，跳过帧解码。
+        from src.ia_amt_frontend import transcribe_ia_amt
+        logger.info(f"  [{inst_name}] Layer 2: ia-amt frontend "
+                    f"(type={config.IA_AMT_TYPE})...")
+        frontend = transcribe_ia_amt(audio_path, model_type=config.IA_AMT_TYPE)
+        notes = [{
+            "onset": note["onset"],
+            "offset": note["offset"],
+            "pitch": note["pitch"],
+            "confidence": note["confidence"],
+            "velocity": note["velocity"],
+            "amplitude": 0.1,
+            "instrument_class": note["instrument_class"],
+        } for note in frontend.get("notes", [])]
+        notes = _enforce_release_limits(notes, config.MIN_NOTE_DURATION)
+    else:
+        logger.info(f"  [{inst_name}] Layer 2: Transcribing...")
+        result = transcribe(audio_path)
+        if result["frame_probs"].size == 0 or result["frame_probs"].max() < 0.01:
+            logger.warning(f"  [{inst_name}] No signal detected, skipping")
+            return False
+
+        logger.info(f"  [{inst_name}] Layer 3: Frame post-processing...")
+        model_sr = result.get("sr", config.SR)
+        model_hop = result.get("hop_length", config.HOP_LENGTH)
+        candidates = process_frames(
+            result["onset_probs"],
+            result["frame_probs"],
+            hop_length=model_hop,
+            sr=model_sr,
+            frame_threshold=config.BP_FRAME_THRESHOLD,
+            onset_threshold=config.BP_ONSET_THRESHOLD,
         )
-    if len(candidates) == 0:
-        logger.warning(f"  [{inst_name}] No candidates after frame post-processing")
-        return False
+        if config.PIANO_USE_MODEL_OFFSET:
+            candidates = _adjust_offsets_with_model(
+                candidates, result.get("offset_probs"), model_hop, model_sr
+            )
+        if len(candidates) == 0:
+            logger.warning(f"  [{inst_name}] No candidates after frame post-processing")
+            return False
 
-    # Load audio for onset refinement (use model's SR for consistency)
-    audio, _sr = librosa.load(audio_path, sr=model_sr, mono=True)
-
-    # Layer 4: Note-level post-processing
-    logger.info(f"  [{inst_name}] Layer 4: Note post-processing...")
-    # VER2.3: BP 后处理候选直接转秒 (跳过谐波/调性过滤 — A/B 证明它们砍 50% 真音符)
-    # VER2.4: 膝跳回声过滤 — 删 (onset_prob<0.15 且 confidence<0.5): 无真实击键的弱音
-    # (melodia_trick 捡起的衰减尾巴/共鸣回声, 真实录音 F1 0.56→0.65)
-    notes = [{
-        "onset": round(c.get("onset_time", c["onset_frame"] * model_hop / model_sr), 4),
-        "offset": round(c.get("offset_time", c["offset_frame"] * model_hop / model_sr), 4),
-        "pitch": c["pitch"],
-        "confidence": c["confidence"],
-        "amplitude": 0.1,
-    } for c in candidates]
-    notes = _enforce_release_limits(notes, config.MIN_NOTE_DURATION)
+        logger.info(f"  [{inst_name}] Layer 4: Note post-processing...")
+        notes = [{
+            "onset": round(c.get("onset_time", c["onset_frame"] * model_hop / model_sr), 4),
+            "offset": round(c.get("offset_time", c["offset_frame"] * model_hop / model_sr), 4),
+            "pitch": c["pitch"],
+            "confidence": c["confidence"],
+            "amplitude": 0.1,
+        } for c in candidates]
+        notes = _enforce_release_limits(notes, config.MIN_NOTE_DURATION)
     if len(notes) == 0:
         logger.warning(f"  [{inst_name}] No notes after refinement")
         return False
@@ -207,7 +245,8 @@ def _process_instrument(audio_path: str, inst_name: str, bpm: float,
     # Export: pretty_midi → .mid → MuseScore CLI → fix BPM → .musicxml
     try:
         import re as _re
-        _write_pretty_midi(notes, midi_path, bpm, inst_name, config.DEFAULT_TIME_SIG)
+        _write_pretty_midi(notes, midi_path, bpm, inst_name, config.DEFAULT_TIME_SIG,
+                           pedal_events=pedal_events)
         logger.info(f"  [{inst_name}] MIDI written: {midi_path}")
 
         musescore = config.MUSESCORE_PATH
@@ -317,3 +356,5 @@ def run_pipeline(audio_path: str, output_dir: str | None = None) -> str:
 
     logger.info(f"=== Pipeline complete: {output_dir} ===")
     return output_dir
+
+

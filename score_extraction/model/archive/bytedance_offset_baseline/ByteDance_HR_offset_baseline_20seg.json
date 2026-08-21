@@ -1,0 +1,242 @@
+{
+  "model": "ByteDance/Kong HR official checkpoint",
+  "checkpoint": "C:\\Users\\ROG\\piano_transcription_inference_data\\note_F1=0.9677_pedal_F1=0.9186.pth",
+  "split": "validation",
+  "segments": 20,
+  "pieces_seen": 10,
+  "segment_seconds": 30.0,
+  "velocity_tolerance": 10,
+  "elapsed_s": 89.4,
+  "micro": {
+    "note_onset": {
+      "precision": 0.986426,
+      "recall": 0.953538,
+      "f1": 0.969704,
+      "tp": 4433,
+      "n_ref": 4649,
+      "n_est": 4494
+    },
+    "note_offset": {
+      "precision": 0.107922,
+      "recall": 0.104324,
+      "f1": 0.106092,
+      "tp": 485,
+      "n_ref": 4649,
+      "n_est": 4494
+    },
+    "note_velocity": {
+      "precision": 0.083222,
+      "recall": 0.080447,
+      "f1": 0.081811,
+      "tp": 374,
+      "n_ref": 4649,
+      "n_est": 4494
+    },
+    "pedal_onset": {
+      "precision": 0.847222,
+      "recall": 0.831818,
+      "f1": 0.83945,
+      "tp": 366,
+      "n_ref": 440,
+      "n_est": 432
+    },
+    "pedal_offset": {
+      "precision": 0.8125,
+      "recall": 0.797727,
+      "f1": 0.805046,
+      "tp": 351,
+      "n_ref": 440,
+      "n_est": 432
+    }
+  },
+  "macro": {
+    "note_onset_p": 0.982533,
+    "note_onset_r": 0.958201,
+    "note_onset_f1": 0.969988,
+    "note_offset_p": 0.100123,
+    "note_offset_r": 0.098532,
+    "note_offset_f1": 0.099302,
+    "note_velocity_p": 0.098052,
+    "note_velocity_r": 0.096551,
+    "pedal_onset_p": 0.855648,
+    "pedal_onset_r": 0.83013,
+    "pedal_onset_f1": 0.841245,
+    "pedal_offset_p": 0.821661,
+    "pedal_offset_r": 0.797052,
+    "pedal_offset_f1": 0.807943
+  },
+  "onset_error_ms": {
+    "median": 0.054,
+    "p90_abs": 10.305
+  },
+  "offset_error_ms": {
+    "median": 8.282,
+    "p90_abs": 130.334
+  },
+  "duration_error_ms": {
+    "median": 7.833,
+    "p90_abs": 131.718
+  },
+  "segments_detail": [
+    {
+      "piece": "2006/MIDI-Unprocessed_17_R1_2006_01-06_ORIG_MID--AUDIO_17_R1_2006_04_Track04_wav.midi",
+      "segment": 0,
+      "gt_notes": 414,
+      "est_notes": 390,
+      "gt_pedal": 32,
+      "est_pedal": 29
+    },
+    {
+      "piece": "2006/MIDI-Unprocessed_17_R1_2006_01-06_ORIG_MID--AUDIO_17_R1_2006_04_Track04_wav.midi",
+      "segment": 1,
+      "gt_notes": 168,
+      "est_notes": 160,
+      "gt_pedal": 10,
+      "est_pedal": 7
+    },
+    {
+      "piece": "2009/MIDI-Unprocessed_07_R1_2009_04-05_ORIG_MID--AUDIO_07_R1_2009_07_R1_2009_04_WAV.midi",
+      "segment": 0,
+      "gt_notes": 130,
+      "est_notes": 132,
+      "gt_pedal": 18,
+      "est_pedal": 17
+    },
+    {
+      "piece": "2009/MIDI-Unprocessed_07_R1_2009_04-05_ORIG_MID--AUDIO_07_R1_2009_07_R1_2009_04_WAV.midi",
+      "segment": 1,
+      "gt_notes": 130,
+      "est_notes": 127,
+      "gt_pedal": 20,
+      "est_pedal": 20
+    },
+    {
+      "piece": "2009/MIDI-Unprocessed_02_R1_2009_03-06_ORIG_MID--AUDIO_02_R1_2009_02_R1_2009_05_WAV.midi",
+      "segment": 0,
+      "gt_notes": 443,
+      "est_notes": 423,
+      "gt_pedal": 27,
+      "est_pedal": 27
+    },
+    {
+      "piece": "2009/MIDI-Unprocessed_02_R1_2009_03-06_ORIG_MID--AUDIO_02_R1_2009_02_R1_2009_05_WAV.midi",
+      "segment": 1,
+      "gt_notes": 493,
+      "est_notes": 454,
+      "gt_pedal": 26,
+      "est_pedal": 26
+    },
+    {
+      "piece": "2009/MIDI-Unprocessed_11_R1_2009_06-09_ORIG_MID--AUDIO_11_R1_2009_11_R1_2009_06_WAV.midi",
+      "segment": 0,
+      "gt_notes": 229,
+      "est_notes": 221,
+      "gt_pedal": 17,
+      "est_pedal": 16
+    },
+    {
+      "piece": "2009/MIDI-Unprocessed_11_R1_2009_06-09_ORIG_MID--AUDIO_11_R1_2009_11_R1_2009_06_WAV.midi",
+      "segment": 1,
+      "gt_notes": 248,
+      "est_notes": 231,
+      "gt_pedal": 13,
+      "est_pedal": 13
+    },
+    {
+      "piece": "2013/ORIG-MIDI_01_7_6_13_Group__MID--AUDIO_03_R1_2013_wav--4.midi",
+      "segment": 0,
+      "gt_notes": 74,
+      "est_notes": 73,
+      "gt_pedal": 14,
+      "est_pedal": 13
+    },
+    {
+      "piece": "2013/ORIG-MIDI_01_7_6_13_Group__MID--AUDIO_03_R1_2013_wav--4.midi",
+      "segment": 1,
+      "gt_notes": 137,
+      "est_notes": 134,
+      "gt_pedal": 13,
+      "est_pedal": 12
+    },
+    {
+      "piece": "2014/MIDI-UNPROCESSED_14-15_R1_2014_MID--AUDIO_15_R1_2014_wav--3.midi",
+      "segment": 0,
+      "gt_notes": 202,
+      "est_notes": 208,
+      "gt_pedal": 32,
+      "est_pedal": 33
+    },
+    {
+      "piece": "2014/MIDI-UNPROCESSED_14-15_R1_2014_MID--AUDIO_15_R1_2014_wav--3.midi",
+      "segment": 1,
+      "gt_notes": 210,
+      "est_notes": 210,
+      "gt_pedal": 29,
+      "est_pedal": 30
+    },
+    {
+      "piece": "2014/MIDI-UNPROCESSED_14-15_R1_2014_MID--AUDIO_15_R1_2014_wav--4.midi",
+      "segment": 0,
+      "gt_notes": 222,
+      "est_notes": 213,
+      "gt_pedal": 25,
+      "est_pedal": 24
+    },
+    {
+      "piece": "2014/MIDI-UNPROCESSED_14-15_R1_2014_MID--AUDIO_15_R1_2014_wav--4.midi",
+      "segment": 1,
+      "gt_notes": 315,
+      "est_notes": 291,
+      "gt_pedal": 18,
+      "est_pedal": 17
+    },
+    {
+      "piece": "2006/MIDI-Unprocessed_22_R1_2006_01-04_ORIG_MID--AUDIO_22_R1_2006_02_Track02_wav.midi",
+      "segment": 0,
+      "gt_notes": 236,
+      "est_notes": 237,
+      "gt_pedal": 29,
+      "est_pedal": 29
+    },
+    {
+      "piece": "2006/MIDI-Unprocessed_22_R1_2006_01-04_ORIG_MID--AUDIO_22_R1_2006_02_Track02_wav.midi",
+      "segment": 1,
+      "gt_notes": 168,
+      "est_notes": 169,
+      "gt_pedal": 20,
+      "est_pedal": 20
+    },
+    {
+      "piece": "2018/MIDI-Unprocessed_Recital8_MID--AUDIO_08_R1_2018_wav--2.midi",
+      "segment": 0,
+      "gt_notes": 235,
+      "est_notes": 234,
+      "gt_pedal": 31,
+      "est_pedal": 31
+    },
+    {
+      "piece": "2018/MIDI-Unprocessed_Recital8_MID--AUDIO_08_R1_2018_wav--2.midi",
+      "segment": 1,
+      "gt_notes": 183,
+      "est_notes": 181,
+      "gt_pedal": 24,
+      "est_pedal": 22
+    },
+    {
+      "piece": "2018/MIDI-Unprocessed_Recital9-11_MID--AUDIO_10_R1_2018_wav--5.midi",
+      "segment": 0,
+      "gt_notes": 233,
+      "est_notes": 230,
+      "gt_pedal": 19,
+      "est_pedal": 19
+    },
+    {
+      "piece": "2018/MIDI-Unprocessed_Recital9-11_MID--AUDIO_10_R1_2018_wav--5.midi",
+      "segment": 1,
+      "gt_notes": 179,
+      "est_notes": 176,
+      "gt_pedal": 23,
+      "est_pedal": 27
+    }
+  ]
+}

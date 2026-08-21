@@ -1,0 +1,87 @@
+{
+  "model": "VER6.0_HighResolution",
+  "checkpoint": ".\\model\\VER6.0_HR_Head16_FreezeOnset_best_val.pth",
+  "checkpoint_epoch": 2,
+  "split": "validation",
+  "segments": 20,
+  "segment_seconds": 30,
+  "decode": {
+    "onset_threshold": 0.65,
+    "frame_threshold": 0.25,
+    "offset_threshold": 0.35,
+    "pedal_onset_threshold": 0.5,
+    "pedal_offset_threshold": 0.5
+  },
+  "velocity_tolerance": 10,
+  "elapsed_s": 6.3,
+  "micro": {
+    "sounding_onset": {
+      "precision": 0.8388,
+      "recall": 0.258662,
+      "f1": 0.395395,
+      "tp": 1202,
+      "n_ref": 4647,
+      "n_est": 1433
+    },
+    "sounding_offset": {
+      "precision": 0.166783,
+      "recall": 0.051431,
+      "f1": 0.078618,
+      "tp": 239,
+      "n_ref": 4647,
+      "n_est": 1433
+    },
+    "raw_offset": {
+      "precision": 0.268667,
+      "recall": 0.082849,
+      "f1": 0.126645,
+      "tp": 385,
+      "n_ref": 4647,
+      "n_est": 1433
+    },
+    "velocity": {
+      "precision": 0.101884,
+      "recall": 0.031418,
+      "f1": 0.048026,
+      "tp": 146,
+      "n_ref": 4647,
+      "n_est": 1433
+    },
+    "pedal_onset": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "n_ref": 440,
+      "n_est": 0
+    },
+    "pedal_offset": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "n_ref": 440,
+      "n_est": 0
+    }
+  },
+  "macro_f1": {
+    "sounding_onset": 0.343909,
+    "sounding_offset": 0.063699,
+    "raw_offset": 0.103316,
+    "velocity": 0.039111,
+    "pedal_onset": 0.0,
+    "pedal_offset": 0.0
+  },
+  "onset_error_ms": {
+    "median": -8.359,
+    "p90_abs": 27.464
+  },
+  "offset_error_ms": {
+    "median": -20.022,
+    "p90_abs": 63.54
+  },
+  "duration_error_ms": {
+    "median": -10.035,
+    "p90_abs": 69.276
+  }
+}

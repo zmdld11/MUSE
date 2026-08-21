@@ -1,0 +1,91 @@
+{
+  "model": "ByteDance/Kong HR official checkpoint",
+  "checkpoint": "C:\\Users\\ROG\\piano_transcription_inference_data\\note_F1=0.9677_pedal_F1=0.9186.pth",
+  "split": "validation",
+  "segments": 1,
+  "pieces_seen": 1,
+  "segment_seconds": 30.0,
+  "velocity_tolerance": 10,
+  "gt_duration": "pedal-aware",
+  "elapsed_s": 4.3,
+  "micro": {
+    "note_onset": {
+      "precision": 0.979487,
+      "recall": 0.922705,
+      "f1": 0.950249,
+      "tp": 382,
+      "n_ref": 414,
+      "n_est": 390
+    },
+    "note_offset": {
+      "precision": 0.789744,
+      "recall": 0.743961,
+      "f1": 0.766169,
+      "tp": 308,
+      "n_ref": 414,
+      "n_est": 390
+    },
+    "note_velocity": {
+      "precision": 0.779487,
+      "recall": 0.7343,
+      "f1": 0.756219,
+      "tp": 304,
+      "n_ref": 414,
+      "n_est": 390
+    },
+    "pedal_onset": {
+      "precision": 0.758621,
+      "recall": 0.6875,
+      "f1": 0.721311,
+      "tp": 22,
+      "n_ref": 32,
+      "n_est": 29
+    },
+    "pedal_offset": {
+      "precision": 0.758621,
+      "recall": 0.6875,
+      "f1": 0.721311,
+      "tp": 22,
+      "n_ref": 32,
+      "n_est": 29
+    }
+  },
+  "macro": {
+    "note_onset_p": 0.979487,
+    "note_onset_r": 0.922705,
+    "note_onset_f1": 0.950249,
+    "note_offset_p": 0.789744,
+    "note_offset_r": 0.743961,
+    "note_offset_f1": 0.766169,
+    "note_velocity_p": 0.779487,
+    "note_velocity_r": 0.7343,
+    "pedal_onset_p": 0.758621,
+    "pedal_onset_r": 0.6875,
+    "pedal_onset_f1": 0.721311,
+    "pedal_offset_p": 0.758621,
+    "pedal_offset_r": 0.6875,
+    "pedal_offset_f1": 0.721311
+  },
+  "onset_error_ms": {
+    "median": 0.281,
+    "p90_abs": 11.012
+  },
+  "offset_error_ms": {
+    "median": -1.679,
+    "p90_abs": 20.105
+  },
+  "duration_error_ms": {
+    "median": -2.202,
+    "p90_abs": 18.598
+  },
+  "segments_detail": [
+    {
+      "piece": "2006/MIDI-Unprocessed_17_R1_2006_01-06_ORIG_MID--AUDIO_17_R1_2006_04_Track04_wav.midi",
+      "segment": 0,
+      "gt_notes": 414,
+      "est_notes": 390,
+      "gt_pedal": 32,
+      "est_pedal": 29
+    }
+  ]
+}
