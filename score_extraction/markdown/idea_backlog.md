@@ -101,3 +101,16 @@
 **备选**：A 中国民乐 AMT（36 类无二胡；连续音高 vs Semi-CRF 离散区间假设天然冲突；无 GT 数据集需合成路线=复刻 SynthTab 方法论，工程月级，当第二篇）；B 节拍约束 Semi-CRF 记谱解码（最新颖最险，并入主推当第二贡献）。
 **本周便宜实验**：1)定位漏检高音（diff raw vs stem pitch 集合）；2){原始,demucs,VER-SEP}×ia-amt×3曲 mini 矩阵验证伪影效应；3)失真失效分桶表；4)记谱量化文献（Cemgil 谱系）；5)服务器起 ia-amt 微调环境+F2 数据搬迁。
 **查证补充**：夏雨=DeepPiano 创始人（智曲科技，清华 CS，实时钢琴转录陪练，产品无论文）；CCMUSIC(TISMIR)/ChMusic/二胡技巧集(1500 clips 11 技法)均无转写 GT。
+
+## K. 乐理先验路线（2026-08-23 立项，用户提案"用乐理反推乐谱"）
+**总架构**：软先验——模板解释不了的保留并标记"独创"（=T4 打分原料）；所有修正可回退留痕。文献坐标见 findings 2026-08-23 乐理路线节（Ojima 2018 / Nakamura 2016·2021 / Cemgil 1999 / MT3 / SIATEC-C / BPS-Motif / Ramage 2023 / McGill Billboard·CoCoPops）。
+
+| 项 | 内容 | 状态 |
+|---|---|---|
+| T1 | **和弦轨 + 和声一致性 + 谱面和弦记号**：半小节窗模板匹配 + Viterbi；每音 chord_tone/diatonic/chromatic 三级标记（outlier 只标记不修正）；`<harmony>` 上谱。src/harmony_prior.py | ✅ v1 落地（kyomu 69 段，I-vi-iii-IV 圈正确检出） |
+| T1.1 | T1 增强：CoCoPops-Billboard bigram（938 首/78k 和弦）接入 Viterbi 转移 + 缺音惩罚 ✅；王道進行/卡农/645系检出 ✅（随 T4）；chromatic outlier 双向复核（audio 谱证据） | 🔶 v1 done |
+| T2 | **节奏模板对撞**：已落地保守版（424 首GT→168 模式库；稀有签名小节→最近邻挪位 ≤1 格）——**BabySlakh 8 首对照判负**（位置误差 base=prior，median 10ms 无可改善；模式错配主因=漏检/多检非抖动，findings 2026-08-23） | ❌ 保守版 |
+| T2.1 | T2 重定向：Nakamura score-LM 思路改做 **时值/模式选择**（位置已不需要修）；或带音频证据的漏检小节模式补全（与 T1 软重打分结合） | ⬜ |
+| T3 | **动机对齐**：SIATEC 类模式发现（噪声容忍：音程向量+编辑距离）→ 重复动机多数投票取规范版本 → 传播修正（文献：Nakamura 2016 重复建模、BPS-Motif 评测） | ⬜ |
+| T4 | **AI 乐曲打分（用户创意点）**：吃 T1/T3 输出——王道浓度 vs 独创度、动机发展密度、和声复杂度、节奏多样性 → 趣味报告。文献线：hit song prediction（Dhanaraj & Logan 2005；Frontiers in AI 2023 神经 97%；腾讯 PDM） | 🔶 v0 done（和声维度；动机/节奏维度待 T3/T2） |
+| T5 | 端到端替代路线：MT3/MR-MT3 token 直出（量化内生于训练）——若后处理线到顶再考虑 | ⬜ 远期 |

@@ -11,9 +11,19 @@ class Config:
         # Route A frontend: bytedance uses official HR events; ours keeps legacy path.
         self.PIANO_FRONTEND = os.environ.get("MUSE_PIANO_FRONTEND", "bytedance")
         # Route B frontend (2026-08-21): ia-amt = anime-song/instrument-agnostic-amt
-        # Semi-CRF（MIT），guitar 检查点默认；可选 guitar_v1_5 / default 等。
+        # Semi-CRF（MIT）。基线钉 guitar_v1_5（07-22 版，四口径全面强于 v1：
+        # GuitarSet 0.9227 / 東の空 stem 0.3863 / 虚無の先严格 45.9%）。
         self.GUITAR_FRONTEND = os.environ.get("MUSE_GUITAR_FRONTEND", "ia_amt")
-        self.IA_AMT_TYPE = os.environ.get("MUSE_IA_AMT_TYPE", "guitar")
+        self.IA_AMT_TYPE = os.environ.get("MUSE_IA_AMT_TYPE", "guitar_v1_5")
+        # 吉他线输入：raw=原始混音直推（矩阵验证吉他主导曲可行，免 demucs 伪影）；
+        # stem=htdemucs_6s 分离轨（暂留，VER-SEP 本地接入后升级 versep 模式）
+        self.GUITAR_ENABLE = os.environ.get("MUSE_GUITAR_ENABLE", "1") not in ("0", "false")
+        self.GUITAR_INPUT = os.environ.get("MUSE_GUITAR_INPUT", "raw")
+        # 多乐器模式（2026-08-22）：ia-amt default 单模型全乐队，按 instrument_class
+        # 分轨落盘（每类一个 .mid + notes.json）。开启时替代吉他单线。
+        self.MULTI_INSTRUMENT = os.environ.get("MUSE_MULTI_INSTRUMENT", "0") == "1"
+        # 记谱层模式（阶段19）：quantized | faithful | both（规则见记谱规则v1.md §4）
+        self.NOTATION_MODE = os.environ.get("MUSE_NOTATION_MODE", "both")
         self.PITCH_MODEL_MONO = "crepe"
         self.SR = 44100
         self.MODEL_SR = 22050    # SR for our trained model (mel spectrogram input)

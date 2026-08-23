@@ -66,7 +66,7 @@ scoremill/
 score_extraction/external/
 
 # 项目文档 markdown 纳入版本控制 (2026-08-01)
-# docs / 汇报 / MUSENote 仅放�?*.md; MUSENote �?Obsidian 本地配置继续忽略
+# docs / 汇报 / MUSENote 仅放行 *.md; MUSENote 的 Obsidian 本地配置继续忽略
 docs/*
 !docs/**/
 !docs/**/*.md
@@ -76,10 +76,10 @@ MUSENote/*
 !MUSENote/**/*.md
 MUSENote/.obsidian/
 
-# article/ 保持忽略: 内含论文 PDF / 全文提取 / 整篇翻译, 公开仓库有版权风�?
+# article/ 保持忽略: 内含论文 PDF / 全文提取 / 整篇翻译, 公开仓库有版权风险
 article/
 
-# Eval 运行产物（numba 缓存/临时目录/诊断 scratch�?
+# Eval 运行产物（numba 缓存/临时目录/诊断 scratch）
 score_extraction/eval/reports/tmp/
 score_extraction/eval/reports/numba_cache/
 score_extraction/eval/reports/_*.wav
@@ -128,3 +128,23 @@ Thumbs.db
 # 模型权重安全岛（2026-08-21）：checkpoints/ 全部不进库，>100MB 会被 GitHub 拒收
 score_extraction/checkpoints/
 checkpoints/
+
+# Frontend (2026-08-22) 前端工程
+frontend/node_modules/
+frontend/src-tauri/target/
+frontend/src-tauri/gen/
+frontend/.vite/
+frontend/*.local
+# 防上面 Python 段的全局 lib/ 规则误伤前端工具目录（shadcn 默认会建 lib/）
+!frontend/src/lib/
+!frontend/src/shared/lib/
+# 演示音频/MIDI（本地拷贝，体积大不进库）
+frontend/public/demo/
+data_bs/
+
+# 会话/工作区产物（2026-08-23）
+.zcode/
+
+# 前端构建产物（Tauri/pnpm）
+frontend/src-tauri/target/
+node_modules/

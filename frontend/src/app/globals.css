@@ -1,0 +1,111 @@
+@import "tailwindcss";
+
+@theme {
+  --color-base: #101014;
+  --color-surface-1: rgb(255 255 255 / 4%);
+  --color-surface-2: rgb(255 255 255 / 8%);
+  --color-surface-3: #1c1d22;
+  --color-stroke: rgb(255 255 255 / 8%);
+  --color-content-1: rgb(255 255 255 / 95%);
+  --color-content-2: rgb(255 255 255 / 60%);
+  --color-content-3: rgb(255 255 255 / 38%);
+  --color-accent: #4cc2ff;
+  --color-accent-press: #2b9fd8;
+  --color-playhead: #4cc2ff;
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "Cascadia Mono", "Consolas", "SF Mono", monospace;
+}
+
+/* 浅色主题（默认）：覆盖语义 token，Tailwind 工具类经 var() 自动跟随 */
+html[data-theme="light"] {
+  --color-base: #f5f6f8;
+  --color-surface-1: rgb(0 0 0 / 4%);
+  --color-surface-2: rgb(0 0 0 / 8%);
+  --color-surface-3: #e8eaee;
+  --color-stroke: rgb(0 0 0 / 10%);
+  --color-content-1: rgb(20 21 24 / 95%);
+  --color-content-2: rgb(20 21 24 / 62%);
+  --color-content-3: rgb(20 21 24 / 42%);
+  --color-accent: #0067c0;
+  --color-accent-press: #00589f;
+  --color-playhead: #0067c0;
+}
+
+/* 卷帘 Canvas 专用 token（JS 侧 getComputedStyle 读取） */
+:root {
+  --app-bg: rgb(16 16 20 / 72%);
+  --roll-lane-c: rgb(255 255 255 / 5%);
+  --roll-lane-b: rgb(255 255 255 / 1.5%);
+  --roll-grid: rgb(255 255 255 / 6%);
+  --roll-ruler-bg: #14151a;
+  --roll-ruler-line: rgb(255 255 255 / 18%);
+  --roll-ruler-text: rgb(255 255 255 / 55%);
+}
+
+html[data-theme="light"] {
+  --app-bg: rgb(245 246 248 / 80%);
+  --roll-lane-c: rgb(0 0 0 / 4.5%);
+  --roll-lane-b: rgb(0 0 0 / 1.8%);
+  --roll-grid: rgb(0 0 0 / 6%);
+  --roll-ruler-bg: #eceef2;
+  --roll-ruler-line: rgb(0 0 0 / 18%);
+  --roll-ruler-text: rgb(0 0 0 / 55%);
+}
+
+html {
+  background: var(--color-base);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  /* 窗口透明 + 亚克力由 Tauri windowEffects 提供，页面底色半透明配合 */
+  background: transparent;
+  color: var(--color-content-1);
+  font-family: var(--font-sans);
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app-bg {
+  background: var(--app-bg);
+}
+
+/* 数字时间码等宽 */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 滚动条：细、半透明 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(128 128 128 / 35%);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(128 128 128 / 55%);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* 尊重系统减弱动画 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -316,17 +316,45 @@ def run_pipeline(audio_path: str, output_dir: str | None = None) -> str:
     logger.info(f"[1/5] BPM: {bpm}")
 
     # Step 2: Source separation (Layer 1)
-    logger.info("[2/5] Source separation (htdemucs_6s)...")
-    tracks = separate_tracks(audio_path, output_dir)
+    # 2026-08-22: 分离只在需要分轨时执行。吉他线 raw 直推（分离矩阵实验验证：
+    # 吉他主导曲 raw≈stem，v1_5 上 raw 掉队 5pt 但 demucs 伪影更伤），VER-SEP
+    # 本地推理接入后 GUITAR_INPUT=versep 再启用。
+    guitar_raw = config.GUITAR_ENABLE and config.GUITAR_INPUT == "raw"
+    need_sep = (not config.ONLY_PIANO) or (
+        config.GUITAR_ENABLE and config.GUITAR_INPUT == "stem")
+    if need_sep:
+        logger.info("[2/5] Source separation (htdemucs_6s)...")
+        tracks = separate_tracks(audio_path, output_dir)
+    else:
+        tracks = {}
 
     # Step 3-5: Process each track
     # 2026-08-02: ONLY_PIANO 时只转录 piano (VER2.4 需分离钢琴轨做 wiener 降噪,
     # 但 bass/guitar/vocals 未适配, 不再生成)
     all_notes = {}
+
+    # 多乐器线（2026-08-22）：default 单模型全乐队，替代吉他单线
+    if config.MULTI_INSTRUMENT:
+        logger.info("[3/5] Multi-instrument (ia-amt default, raw direct)...")
+        try:
+            from src.multi_instrument import run_multi_instrument
+            run_multi_instrument(audio_path, output_dir, bpm)
+        except Exception as exc:
+            logger.error(f"  [multi] Pipeline crashed: {exc}", exc_info=True)
+    # 吉他线（2026-08-22 打通）：raw 模式直接吃原始音频
+    elif guitar_raw:
+        logger.info("[3/5] Guitar (raw direct, ia-amt)...")
+        try:
+            _process_instrument(audio_path, "guitar", bpm, output_dir)
+        except Exception as exc:
+            logger.error(f"  [guitar] Pipeline crashed: {exc}", exc_info=True)
+
     for inst_name, wav_path in tracks.items():
         if inst_name == "drums":
             all_notes[inst_name] = []
             continue
+        if inst_name == "guitar" and guitar_raw:
+            continue  # raw 模式已用原音频处理过
         if config.ONLY_PIANO and inst_name != "piano":
             logger.info(f"  [ONLY_PIANO] 跳过 {inst_name} (未适配)")
             continue
