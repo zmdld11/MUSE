@@ -25,8 +25,19 @@ def separate_tracks(audio_path: str, output_dir: str) -> dict[str, str]:
     """
     使用 demucs Python API 分离音轨。
     绕过 torchcodec 依赖：用 librosa 预加载音频。
+    结果缓存：output_dir 下 6 个 stem wav 齐全时直接复用（重跑免分离）。
     """
     os.makedirs(output_dir, exist_ok=True)
+
+    basename = os.path.splitext(os.path.basename(audio_path))[0]
+    cached = {}
+    for stem in TRACK_MAP.values():
+        wav_path = os.path.join(output_dir, f"{basename}_{stem}.wav")
+        if os.path.exists(wav_path):
+            cached[stem] = wav_path
+    if len(cached) == len(TRACK_MAP):
+        logger.info(f"  [demucs] cached {len(cached)} stems in {output_dir}")
+        return cached
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"Loading demucs model on {device}...")

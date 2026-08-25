@@ -22,6 +22,12 @@ class Config:
         # 多乐器模式（2026-08-22）：ia-amt default 单模型全乐队，按 instrument_class
         # 分轨落盘（每类一个 .mid + notes.json）。开启时替代吉他单线。
         self.MULTI_INSTRUMENT = os.environ.get("MUSE_MULTI_INSTRUMENT", "0") == "1"
+        # 多乐器线分离（2026-08-24/25）。BS 8 首端到端 A/B（report_ab_v3.json）：
+        #   off 0.4899(P.85) > versep_guitar 0.4738(P.81) > versep_demucs 0.4714(P.73)
+        # 合成干净混音上分离无增益（同 URMP 结论）；但产品域（真实歌抓吉他，F2
+        # 受控基准）VER-SEP +12.6pt / AUPRC 0.250→0.525，且 VER-SEP 2.0 下游
+        # F1 0.531→0.597。默认混合模式：吉他吃分离红利，其余类保直通精度。
+        self.MULTI_SEPARATION = os.environ.get("MUSE_MULTI_SEPARATION", "versep_guitar")
         # 记谱层模式（阶段19）：quantized | faithful | both（规则见记谱规则v1.md §4）
         self.NOTATION_MODE = os.environ.get("MUSE_NOTATION_MODE", "both")
         self.PITCH_MODEL_MONO = "crepe"

@@ -35,6 +35,33 @@ MIN_NOTE_SEC = 0.023
 # 语义应为弦乐合奏（48）
 CLASS_PROGRAM_OVERRIDES = {"strings": 48}
 
+# per-stem 乐器门控（大横评 2026-08-24 结论#7）：stemwise 合并必须按 stem 类型
+# 过滤输出音色——每个 stem 都被全乐器前端转写一遍，同类音符会在多 stem 重复
+# 出现，合并后假阳性翻倍（ymt3 demucs -32pt 教训）。类名取自 ia-amt taxonomy
+# （36 类）。drums 不设门：ia default 不输出鼓类事件，前端亦无鼓谱面。
+GUITAR_CLASSES = {"acoustic_guitar", "distorted_guitar", "electric_guitar_clean",
+                  "electric_guitar_muted", "guitar_harmonics"}
+BASS_CLASSES = {"electric_bass", "acoustic_bass", "slap_bass", "synth_bass"}
+KEYS_CLASSES = {"piano", "electric_piano", "organ", "plucked_keyboard"}
+VOICE_CLASSES = {"melody", "vocal_harmony", "choir"}
+# other stem 的长尾类 = 全集 - 吉他/贝斯/人声 - 鼓/效果类（交由 MIN_CLASS_NOTES 粗筛）。
+# 注意 KEYS 类对 other stem 也放行：合成器键琴常落在 demucs "other" 而 piano stem
+# 近空（BS 键盘密集曲实测键盘轨整轨消失）；piano/other 两 stem 的 KEYS 事件按类
+# 合并后由 clean_notes 截同音高重叠。
+_OTHER_EXCLUDE = GUITAR_CLASSES | BASS_CLASSES | VOICE_CLASSES | {
+    "drums", "chromatic_percussion", "percussive_fx", "sound_fx", "synth_fx"}
+_ALL_CLASSES = {
+    "accordion_family", "acoustic_bass", "acoustic_guitar", "brass", "choir",
+    "chromatic_percussion", "distorted_guitar", "drums", "electric_bass",
+    "electric_guitar_clean", "electric_guitar_muted", "electric_piano", "ethnic",
+    "flute_pipe", "guitar_harmonics", "harmonica", "orchestra_hit", "orchestral_harp",
+    "orchestral_woodwind", "organ", "percussive_fx", "piano", "pizzicato_strings",
+    "plucked_keyboard", "sax", "slap_bass", "sound_fx", "strings", "synth_bass",
+    "synth_fx", "synth_lead", "synth_pad", "timpani", "melody", "vocal_harmony",
+    "wind_chimes",
+}
+OTHER_CLASSES = _ALL_CLASSES - _OTHER_EXCLUDE
+
 
 def clean_notes(notes: list[dict]) -> tuple[list[dict], dict]:
     """记谱规则v1.md §3 数据层清洗：同音高重叠截断（唯一硬规则）。
@@ -88,6 +115,51 @@ def union_active_seconds(notes: list[dict]) -> float:
     return total
 
 
+def _stem_mean_amp(path: str) -> float:
+    """stem 平均幅度（静音 stem 免推理）。"""
+    import soundfile as sf
+    x, _ = sf.read(path, dtype="float32", always_2d=True)
+    return float(abs(x).mean())
+
+
+def _separated_stem_specs(audio_path: str, output_dir: str) -> list[tuple[str, str, set]]:
+    """分离并给出 (标签, stem 路径, 乐器类门控) 列表。
+
+    VER-SEP 2.0 出吉他（验收：F2 versep 下游 F1 0.531→0.597）；htdemucs_6s
+    出其余。drums stem 不喂（无鼓谱面）。产物缓存在 output_dir/sep/，重跑免分离。
+    """
+    from src.source_separate import separate_tracks
+    from src.versep_sep import separate_guitar
+
+    sep_dir = os.path.join(output_dir, "sep")
+    guitar_wav = separate_guitar(audio_path, os.path.join(sep_dir, "versep"))
+    logger.info("  [multi] demucs htdemucs_6s 分离其余 stem...")
+    demucs_stems = separate_tracks(audio_path, os.path.join(sep_dir, "demucs"))
+
+    specs: list[tuple[str, str, set]] = []
+    if guitar_wav is not None:
+        specs.append(("guitar:versep", guitar_wav, GUITAR_CLASSES))
+    elif "guitar" in demucs_stems:
+        specs.append(("guitar:demucs", demucs_stems["guitar"], GUITAR_CLASSES))
+    specs += [
+        ("bass:demucs", demucs_stems.get("bass", ""), BASS_CLASSES),
+        ("piano:demucs", demucs_stems.get("piano", ""), KEYS_CLASSES),
+        ("vocals:demucs", demucs_stems.get("vocals", ""), VOICE_CLASSES),
+        ("other:demucs", demucs_stems.get("other", ""), OTHER_CLASSES),
+    ]
+    kept = []
+    for label, wav, gate in specs:
+        if not wav or not os.path.exists(wav):
+            logger.warning(f"  [multi] stem 缺失，跳过: {label}")
+            continue
+        amp = _stem_mean_amp(wav)
+        if amp < 1e-4:
+            logger.info(f"  [multi] stem 近无声（amp={amp:.2e}），跳过: {label}")
+            continue
+        kept.append((label, wav, gate))
+    return kept
+
+
 def run_multi_instrument(audio_path: str, output_dir: str, bpm: float) -> bool:
     from src.ia_amt_frontend import transcribe_ia_amt
     from instrument_agnostic_amt.taxonomy.instrument_classes import (
@@ -95,16 +167,47 @@ def run_multi_instrument(audio_path: str, output_dir: str, bpm: float) -> bool:
         get_program_number_from_class_id,
     )
 
-    logger.info("  [multi] Layer 2: ia-amt default frontend (全乐队)...")
-    frontend = transcribe_ia_amt(audio_path, model_type="default")
-    notes = frontend.get("notes", [])
-    if not notes:
-        logger.warning("  [multi] no notes from default model")
-        return False
+    # 直调本函数时调用方可能未建目录（pipeline.py 由上游建；A/B 驱动曾因此全灭）
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 分离模式（config.MULTI_SEPARATION）：
+    # off = 混音直通单次推理（旧行为）；
+    # versep_demucs = VER-SEP 吉他 + htdemucs_6s 其余 + per-stem 门控（全 stemwise）；
+    # versep_guitar = 混合（默认）：吉他走 VER-SEP stem（F2 证据 AUPRC 0.250→
+    #   0.525 + 2.0 后下游 0.597），其余类混音直通（BS A/B：demucs stemwise 掉精度）
+    separated = config.MULTI_SEPARATION != "off"
+    if config.MULTI_SEPARATION == "versep_guitar":
+        from src.versep_sep import separate_guitar
+        sep_dir = os.path.join(output_dir, "sep")
+        guitar_wav = separate_guitar(audio_path, os.path.join(sep_dir, "versep"))
+        rest_gate = _ALL_CLASSES - GUITAR_CLASSES
+        if guitar_wav is not None:
+            runs = [("guitar:versep", guitar_wav, GUITAR_CLASSES),
+                    ("<raw>", audio_path, rest_gate)]
+        else:  # VER-SEP 不可用 → 纯直通
+            runs, separated = [("<raw>", audio_path, set())], False
+    elif separated:
+        runs = _separated_stem_specs(audio_path, output_dir)
+        if not runs:
+            logger.warning("  [multi] 分离未产出可用 stem，回退混音直通")
+            runs, separated = [("<raw>", audio_path, set())], False
+    else:
+        runs = [("<raw>", audio_path, set())]
 
     groups: dict[str, list[dict]] = {}
-    for n in notes:
-        groups.setdefault(n["instrument_class"], []).append(n)
+    for label, wav, gate in runs:
+        logger.info(f"  [multi] Layer 2: ia-amt default frontend @ {label}...")
+        frontend = transcribe_ia_amt(wav, model_type="default")
+        stem_notes = frontend.get("notes", [])
+        if gate:
+            stem_notes = [n for n in stem_notes if n["instrument_class"] in gate]
+        for n in stem_notes:
+            groups.setdefault(n["instrument_class"], []).append(n)
+        logger.info(f"  [multi] {label}: {len(frontend.get('notes', []))} notes "
+                    f"-> {len(stem_notes)} 门控后保留")
+    if not groups:
+        logger.warning("  [multi] no notes from default model")
+        return False
     groups = {k: v for k, v in groups.items() if len(v) >= MIN_CLASS_NOTES}
 
     # 记谱规则v1 §3 时值清洗 + §2 准入统计
@@ -113,6 +216,7 @@ def run_multi_instrument(audio_path: str, output_dir: str, bpm: float) -> bool:
         cls_notes, cstats = clean_notes(cls_notes)
         groups[cls] = cls_notes
         track_stats[cls] = cstats
+    notes = [n for v in groups.values() for n in v]
     duration = max(n["offset"] for n in notes)
 
     logger.info(f"  [multi] {len(notes)} notes -> {len(groups)} tracks: "
@@ -169,7 +273,12 @@ def run_multi_instrument(audio_path: str, output_dir: str, bpm: float) -> bool:
         "time_signature": config.DEFAULT_TIME_SIG,
         "duration": round(float(duration), 3),
         "source": {"audio": audio_path, "frontend": "ia_amt:default",
-                   "separated": False},
+                   "separated": separated,
+                   **({"separators": {
+                          "guitar": "VERSEP2.0+bs4",
+                          "others": "htdemucs_6s" if config.MULTI_SEPARATION == "versep_demucs" else "raw-direct"},
+                       "mode": config.MULTI_SEPARATION,
+                       "stem_gating": True} if separated else {})},
         "tracks": tracks_json,
     }
     with open(os.path.join(output_dir, "notes.json"), "w", encoding="utf-8") as f:
