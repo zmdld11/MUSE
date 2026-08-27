@@ -96,6 +96,8 @@ def sync_to_frontend(out_dirs: list[Path]) -> None:
                 shutil.copyfile(out_dir / item, dst / item)
         if (out_dir / "notation").exists():
             shutil.copytree(out_dir / "notation", dst / "notation")
+        for f in out_dir.glob("*.mid"):  # 转写原始 mid（对照用）
+            shutil.copyfile(f, dst / f.name)
         audio = idx.get("audio")
         if audio and (out_dir / audio).exists():
             shutil.copyfile(out_dir / audio, dst / audio)
@@ -121,6 +123,11 @@ def main() -> int:
     if args.demo_sync:
         for d in args.demo_sync:
             d = Path(d)
+            if not (d / "notation" / "notation.json").exists():
+                # 无记谱产物（如 raw 对照包）：跳过重组装，沿用已有 index.json
+                if not (d / "index.json").exists():
+                    print(f"[run_one] !! {d} 无 notation.json 且无 index.json，跳过")
+                continue
             n = json.loads((d / "notation" / "notation.json").read_text(encoding="utf-8"))
             audio_in_dir = next(iter(list(d.glob("*.flac")) + list(d.glob("*.wav"))), None)
             if audio_in_dir is None:

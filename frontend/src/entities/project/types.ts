@@ -54,6 +54,8 @@ export interface NotationMeta {
   key?: string; // 调号估计（"E major"）
   analysis?: { summary?: string } & Record<string, unknown>; // T4 乐曲分析
   tracks: NotationTrackMeta[];
+  /** 真实时间→谱面 QL 分段线性表（rubato 曲目光标同步；缺省回退名义 bpm） */
+  timeMap?: [number, number][];
 }
 
 export type ViewMode = "roll" | "score";

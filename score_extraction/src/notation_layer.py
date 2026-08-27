@@ -715,7 +715,13 @@ def build_track_events(cls: str, notes: list[dict], raw_onsets: dict[int, float]
 
     clustered = _cluster_simultaneity(events)
     guard = _post_snap_guard(events)
-    seams = _merge_quantized_seams(events)
+    seams = 0
+    if os.environ.get("MUSE_SEAM_MERGE"):  # 默认停用（2026-08-27 用户拍板
+        # "忠于音头"）：本合并原意是融合"同一音被转写切段"的接缝，但吉他
+        # 同音重复拨弦（音头间隔 0-40ms 的真再攻击）与接缝在纯音符边界
+        # 下不可分——kyomu acoustic_guitar 实测被吞 408/940 音（43%），听感
+        # 直接缺音头。保留代码仅作调试出口。
+        seams = _merge_quantized_seams(events)
     from src.rhythm_prior import apply_rhythm_prior  # T2 节奏模板对撞（默认关）
     prior_bars = apply_rhythm_prior(events)
     durations = _reassign_durations(events, bpm)
@@ -1419,6 +1425,22 @@ def _duration_stats(out_tracks: list[dict]) -> dict:
             "phrase_rest_per_event": round(n_rests / max(1, n_events), 4)}
 
 
+def _export_time_map(rec: dict, pooled: list[dict]) -> list[list[float]]:
+    """格点映射 cont(t) → 分段线性采样表 [[t 秒, QL], …]（0.5s 步长）。
+
+    前端谱面光标用它把播放时间换算成谱面位置（QL 单调递增，可逆插值）。
+    """
+    import numpy as np
+    cont = rec["cont"]
+    ts = [float(n["onset"]) for n in pooled]
+    t0, t1 = min(ts), max(ts)
+    grid = np.arange(t0, t1 + 0.5, 0.5)
+    if len(grid) < 2:
+        grid = np.array([t0, t0 + 1.0])
+    return [[round(float(t), 3), round(float(cont(float(t))), 4)]
+            for t in grid]
+
+
 def _export_score_mids(out_tracks: list[dict], bpm: float, output_dir: str,
                        ql_per_measure: Fraction = Fraction(4)) -> list[str]:
     """准入轨道 → notation/score_mid/{cls}.mid（Phase-1：播放与谱面同源）。
@@ -1685,6 +1707,9 @@ def build_notation(notes_json: dict, output_dir: str, mode: str = "both") -> dic
         "key": key_sig,
         "harmony_track": harmony_segments or [],
         "analysis": analysis,
+        # 真实时间→谱面 QL 映射（分段线性采样，rubato 曲目谱面光标/滚动
+        # 用它，不再按名义 bpm 匀速跑——"歌没放一半谱滚完了"的根因）
+        "time_map": _export_time_map(rec, pooled),
         "meta": {"quantizer": map_kind,
                  "halfbeat_med_ql": halfbeat_med,
                  "bpm_detected": round(bpm_detected, 2),

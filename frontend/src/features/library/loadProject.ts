@@ -80,6 +80,7 @@ export function parseNotationMeta(
   const n = JSON.parse(text) as {
     key?: string;
     analysis?: { summary?: string };
+    time_map?: [number, number][];
     tracks?: {
       instrument_class: string;
       events: { bar: number; onset_sec: number }[];
@@ -91,7 +92,13 @@ export function parseNotationMeta(
     firstOnsetSec: t.events.length ? t.events[0].onset_sec : 0,
     noteCount: t.events.length,
   }));
-  return { ...base, key: n.key, analysis: n.analysis, tracks };
+  return {
+    ...base,
+    key: n.key,
+    analysis: n.analysis,
+    tracks,
+    timeMap: Array.isArray(n.time_map) ? n.time_map : undefined,
+  };
 }
 
 async function buildAndLoad(raw: RawProject): Promise<Project> {

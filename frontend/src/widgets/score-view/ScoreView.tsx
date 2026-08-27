@@ -11,8 +11,8 @@ import { cn } from "@/shared/utils/cn";
 /**
  * 乐谱视图（M4）：OSMD 渲染管线 notation/ 产物。
  * - 轨道页签切换单乐器谱（乐器面板行点击也会切）
- * - 播放光标联动：OSMD cursor 逐步推进，与卷帘共享同一条 playback 时间轴；
- *   时间→步数映射在渲染后用 iterator 时间戳走一遍建立
+ * - 播放光标 = 自绘覆盖层，逐音锚定：t→QL（timeMap 反查）→当前发声
+ *   音符的刻版 x（谱表条目锚点），与卷帘正在播放的音一一对应
  */
 export function ScoreView() {
   const project = usePlayerStore((s) => s.project);
@@ -114,22 +114,29 @@ function ScoreCanvas({ notation }: { notation: NotationMeta }) {
 
   const containerRef = useRef<HTMLDivElement>(null);
   const osmdRef = useRef<OpenSheetMusicDisplay | null>(null);
-  const stepTimesRef = useRef<number[]>([]);
-  const lastStepRef = useRef(-1);
+  const measureRowsRef = useRef<
+    { ql: number; x: number; w: number; yTop: number; yBot: number }[]
+  >([]);
+  const anchorsRef = useRef<{ ql: number; x: number; rowIdx: number }[]>([]);
+  const overlayRef = useRef<HTMLDivElement | null>(null);
   const lastScrolledRef = useRef(-1);
   const [renderToken, setRenderToken] = useState(0); // 渲染完成信号
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // 谱面加载/渲染（轨道或模式切换时重建 OSMD 实例）
+  // 谱面加载/渲染：OSMD 实例每个容器只建一个，轨道切换时复用（load+render）。
+  // 并发防护：StrictMode/HMR 下 effect 会重入，每个 await 之后必须先查
+  // cancelled 再 render——否则后一次重入的 innerHTML 清空会被先一次迟到的
+  // SVG 覆盖，谱面就画两遍（2026-08-27 用户报告）。
   useEffect(() => {
     let cancelled = false;
     const el = containerRef.current;
     if (!el || !trackMeta) return;
     setBusy(true);
     setError(null);
-    stepTimesRef.current = [];
-    lastStepRef.current = -1;
+    measureRowsRef.current = [];
+    anchorsRef.current = [];
+    lastScrolledRef.current = -1;
     el.innerHTML = "";
 
     (async () => {
@@ -146,8 +153,10 @@ function ScoreCanvas({ notation }: { notation: NotationMeta }) {
           xml = await r.text();
         }
 
+        // autoResize=false：版心宽度固定，resize 触发的后台重渲染会与本
+        // effect 的清空/重画赛跑
         const opts = {
-          autoResize: true,
+          autoResize: false,
           backend: "svg",
           followCursor: false,
           drawTitle: false,
@@ -156,47 +165,112 @@ function ScoreCanvas({ notation }: { notation: NotationMeta }) {
           drawLyricist: false,
           drawingParameters: "default",
         } as ConstructorParameters<typeof OpenSheetMusicDisplay>[1];
-        let instance = new OpenSheetMusicDisplay(el, opts);
+        if (!osmdRef.current) {
+          osmdRef.current = new OpenSheetMusicDisplay(el, opts);
+        }
+        const instance = osmdRef.current;
         try {
           await instance.load(xml);
+          if (cancelled) return;
           instance.render();
         } catch {
           // TAB part 兼容兜底：剥离 TAB 谱表后重载
-          el.innerHTML = "";
-          instance = new OpenSheetMusicDisplay(el, opts);
           await instance.load(stripTabParts(xml));
+          if (cancelled) return;
           instance.render();
         }
         if (cancelled) return;
-        osmdRef.current = instance;
 
-        // 时间→步数表：iterator 逐步走一遍（时间戳为谱面相对四分音符位置）
-        const bpm = project?.bpm ?? 120;
-        const offsetSec = trackMeta.minBar * 4 * (60 / bpm);
-        const cursor = osmdRef.current.cursor;
-        cursor.show();
-        cursor.reset();
-        const times: number[] = [];
-        for (let i = 0; i < 30000; i++) {
-          const it = (cursor as unknown as {
-            iterator?: {
-              endReached: boolean;
-              currentTimeStamp?: { realValue: number };
-            };
-          }).iterator;
-          if (!it) break;
-          const ql = it.currentTimeStamp?.realValue ?? 0;
-          times.push(offsetSec + (ql * 60) / bpm);
-          if (it.endReached) break;
-          try {
-            cursor.next();
-          } catch {
-            break;
+        // 光标几何源：小节行（y/滚动）+ 谱表条目锚点（x）。锚点 = 每个
+        // 音符/休止符条目的刻版 x 与绝对 QL——刻版横向间距不均匀（密集
+        // 音挤、长音占位大），按时间线性扫谱面必然跑偏；改为逐音跳位，
+        // 光标永远停在当前发声的音符上（OSMD issue #480 / alphaTab 同款
+        // note-anchored 思路；2026-08-27 用户要求与卷帘音符锁死）。
+        type BB = {
+          absolutePosition: { x: number; y: number };
+          size: { width: number; height: number };
+        };
+        const inst = instance as unknown as {
+          graphic?: {
+            MeasureList?: {
+              PositionAndShape: BB;
+              staffEntries?: {
+                getAbsoluteTimestamp?: () => { RealValue?: number };
+                PositionAndShape: BB;
+              }[];
+            }[][];
+          };
+          Sheet?: {
+            SourceMeasures?: {
+              AbsoluteTimestamp?: { RealValue?: number; n?: number; d?: number };
+            }[];
+          };
+          Zoom?: number;
+        };
+        const rows: {
+          ql: number;
+          x: number;
+          w: number;
+          yTop: number;
+          yBot: number;
+        }[] = [];
+        const anchors: { ql: number; x: number; rowIdx: number }[] = [];
+        const ml = inst.graphic?.MeasureList ?? [];
+        for (let i = 0; i < ml.length; i++) {
+          let x = Infinity;
+          let w = 0;
+          let yTop = Infinity;
+          let yBot = -Infinity;
+          const entries: { ql: number; x: number }[] = [];
+          for (const gm of ml[i] ?? []) {
+            const bb = gm.PositionAndShape;
+            const left = bb.absolutePosition.x - bb.size.width / 2;
+            x = Math.min(x, left);
+            w = Math.max(w, bb.size.width);
+            yTop = Math.min(yTop, bb.absolutePosition.y - bb.size.height / 2);
+            yBot = Math.max(yBot, bb.absolutePosition.y + bb.size.height / 2);
+            for (const se of gm.staffEntries ?? []) {
+              const ts = se.getAbsoluteTimestamp?.();
+              if (!ts) continue;
+              entries.push({
+                ql: Number(ts.RealValue ?? 0),
+                x: se.PositionAndShape.absolutePosition.x,
+              });
+            }
+          }
+          if (!isFinite(x)) continue;
+          const ts = inst.Sheet?.SourceMeasures?.[i]?.AbsoluteTimestamp;
+          const qlScore = ts
+            ? Number(ts.RealValue ?? (ts.n ?? 0) / (ts.d ?? 1))
+            : i * 4;
+          // 小节时间戳是渲染谱相对值；timeMap 的 QL 是全曲绝对值
+          rows.push({ ql: qlScore + trackMeta.minBar * 4, x, w, yTop, yBot });
+          for (const e of entries) {
+            anchors.push({
+              ql: e.ql + trackMeta.minBar * 4,
+              x: e.x,
+              rowIdx: rows.length - 1,
+            });
           }
         }
-        stepTimesRef.current = times;
-        cursor.reset();
-        lastStepRef.current = -1;
+        measureRowsRef.current = rows;
+        // 同刻去重（钢琴大谱表上下行/多声部同拍）：排序后取最靠左者
+        anchors.sort((a, b) => a.ql - b.ql || a.x - b.x);
+        const dedup: typeof anchors = [];
+        for (const a of anchors) {
+          const last = dedup[dedup.length - 1];
+          if (last && Math.abs(a.ql - last.ql) < 1e-6) continue;
+          dedup.push(a);
+        }
+        anchorsRef.current = dedup;
+        const ov = document.createElement("div");
+        ov.style.cssText =
+          "position:absolute;z-index:5;pointer-events:none;display:none;" +
+          "width:3px;border-radius:2px;background:rgba(225,29,72,0.9);" +
+          "box-shadow:0 0 0 1px rgba(225,29,72,0.25);" +
+          "transition:left 60ms linear;";
+        el.appendChild(ov);
+        overlayRef.current = ov;
         setRenderToken((n) => n + 1);
         setBusy(false);
       } catch (e) {
@@ -208,63 +282,87 @@ function ScoreCanvas({ notation }: { notation: NotationMeta }) {
 
     return () => {
       cancelled = true;
+      overlayRef.current?.remove();
+      overlayRef.current = null;
     };
   }, [notation, trackMeta, active, project?.bpm]);
 
-  // 播放光标联动（rAF；暂停时也跟随进度条拖拽）
+  // 播放光标联动（rAF；暂停/拖拽进度条也跟随）：t → QL（timeMap 反查）
+  // → 二分"最后一个 onset ≤ QL"的锚点，光标停在当前发声的音符上
   useEffect(() => {
-    if (renderToken === 0) return;
+    if (renderToken === 0 || !trackMeta) return;
     let raf = 0;
     const tick = () => {
-      const osmd = osmdRef.current;
-      const times = stepTimesRef.current;
-      if (osmd?.cursor && times.length > 0) {
+      const ov = overlayRef.current;
+      const rows = measureRowsRef.current;
+      const anchors = anchorsRef.current;
+      if (ov && rows.length > 0) {
         const eng = activeEngine();
         const t =
           eng.duration > 0
             ? eng.currentTime
             : usePlayerStore.getState().currentTime;
-        let target = -1;
-        let lo = 0;
-        let hi = times.length - 1;
-        while (lo <= hi) {
-          const mid = (lo + hi) >> 1;
-          if (times[mid] <= t) {
-            target = mid;
-            lo = mid + 1;
-          } else {
-            hi = mid - 1;
+        // t → QL（timeMap 反查；缺省回退名义 bpm）
+        const tm = notation.timeMap;
+        const bpm = project?.bpm ?? 120;
+        const offsetSec = trackMeta.minBar * 4 * (60 / bpm);
+        let ql: number;
+        if (tm && tm.length >= 2) {
+          let lo = 0;
+          while (lo < tm.length - 2 && tm[lo + 1][0] < t) lo++;
+          const [t0, q0] = tm[lo];
+          const [t1, q1] = tm[lo + 1];
+          ql = t1 > t0 ? q0 + ((t - t0) / (t1 - t0)) * (q1 - q0) : q0;
+        } else {
+          ql = ((t - offsetSec) * bpm) / 60 + trackMeta.minBar * 4;
+        }
+        const inst = osmdRef.current as unknown as { Zoom?: number };
+        const zoom = inst?.Zoom ?? 1;
+        let x: number;
+        let rowIdx: number;
+        if (anchors.length > 0) {
+          // 当前发声音符 = 最后一个 onset ≤ QL 的谱表条目
+          let lo = 0;
+          let hi = anchors.length - 1;
+          while (lo < hi) {
+            const mid = (lo + hi + 1) >> 1;
+            if (anchors[mid].ql <= ql) lo = mid;
+            else hi = mid - 1;
           }
-        }
-        const cursor = osmd.cursor;
-        if (target < lastStepRef.current) {
-          cursor.reset();
-          lastStepRef.current = -1;
-        }
-        while (lastStepRef.current < target) {
-          try {
-            cursor.next();
-          } catch {
-            break;
+          x = anchors[lo].x;
+          rowIdx = anchors[lo].rowIdx;
+        } else {
+          // 兜底（无锚点）：小节内 QL 线性插值
+          let idx = 0;
+          let hi = rows.length - 1;
+          while (idx < hi) {
+            const mid = (idx + hi + 1) >> 1;
+            if (rows[mid].ql <= ql) idx = mid;
+            else hi = mid - 1;
           }
-          lastStepRef.current++;
+          const r = rows[idx];
+          const frac = Math.max(0, Math.min(1, (ql - r.ql) / 4));
+          x = r.x + frac * r.w;
+          rowIdx = idx;
         }
-        // 播放中自动滚到光标（步数变化时节流）
-        if (
-          usePlayerStore.getState().isPlaying &&
-          lastScrolledRef.current !== lastStepRef.current
-        ) {
-          lastScrolledRef.current = lastStepRef.current;
-          const cursorEl = (cursor as unknown as { cursorElement?: Element })
-            .cursorElement;
-          cursorEl?.scrollIntoView({ block: "center", behavior: "smooth" });
+        const r = rows[Math.min(rowIdx, rows.length - 1)];
+        ov.style.display = "block";
+        ov.style.left = `${10 * x * zoom}px`;
+        // 上下各延长 1.2 个谱线间距，保证贯穿多谱表行（标准谱+TAB）
+        ov.style.top = `${10 * (r.yTop - 1.2) * zoom}px`;
+        ov.style.height = `${10 * (r.yBot - r.yTop + 2.4) * zoom}px`;
+        if (lastScrolledRef.current !== rowIdx) {
+          lastScrolledRef.current = rowIdx;
+          if (usePlayerStore.getState().isPlaying) {
+            ov.scrollIntoView({ block: "center", behavior: "smooth" });
+          }
         }
       }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [renderToken]);
+  }, [renderToken, notation, trackMeta, project?.bpm]);
 
   return (
     <div className="relative mx-auto max-w-[1140px]">
