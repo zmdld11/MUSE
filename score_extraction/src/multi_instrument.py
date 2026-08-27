@@ -167,6 +167,12 @@ def run_multi_instrument(audio_path: str, output_dir: str, bpm: float) -> bool:
         get_program_number_from_class_id,
     )
 
+    # 入口 absolutize：下游分离子进程会切 cwd（MSST），相对路径在子进程侧
+    # 解析错位 → "Total files found: 0"（2026-08-27 批量 10 首全挂根因；
+    # kyomu 曾因分离缓存命中掩盖此 bug）
+    audio_path = os.path.abspath(audio_path)
+    output_dir = os.path.abspath(output_dir)
+
     # 直调本函数时调用方可能未建目录（pipeline.py 由上游建；A/B 驱动曾因此全灭）
     os.makedirs(output_dir, exist_ok=True)
 
@@ -197,7 +203,8 @@ def run_multi_instrument(audio_path: str, output_dir: str, bpm: float) -> bool:
     groups: dict[str, list[dict]] = {}
     for label, wav, gate in runs:
         logger.info(f"  [multi] Layer 2: ia-amt default frontend @ {label}...")
-        frontend = transcribe_ia_amt(wav, model_type="default")
+        frontend = transcribe_ia_amt(wav, model_type="default",
+                                     note_bias=config.IA_NOTE_BIAS)
         stem_notes = frontend.get("notes", [])
         if gate:
             stem_notes = [n for n in stem_notes if n["instrument_class"] in gate]
@@ -266,12 +273,26 @@ def run_multi_instrument(audio_path: str, output_dir: str, bpm: float) -> bool:
                     f"score_worthy={tracks_json[-1]['score_worthy']}, "
                     f"cleanup={cstats}")
 
+    # 节拍跟踪（时值 v3.2）：rubato 曲目记谱格点映射的素材（失败不致命，
+    # 记谱层回退 onset 格点拟合）
+    beat_info: dict = {}
+    try:
+        from src.beat_track import extract_beats
+        beat_info = extract_beats(audio_path)
+        if beat_info:
+            logger.info("  [multi] beat track: %d 拍, 脉冲 %.3fs (%.1f/min)",
+                        len(beat_info["beat_times"]), beat_info["pulse_sec"],
+                        beat_info["tempo_pulse"])
+    except Exception:
+        logger.warning("  [multi] beat tracking failed", exc_info=True)
+
     notes_json = {
         "schema_version": 1,
         "song": os.path.splitext(os.path.basename(audio_path))[0],
         "bpm": bpm,
         "time_signature": config.DEFAULT_TIME_SIG,
         "duration": round(float(duration), 3),
+        **beat_info,
         "source": {"audio": audio_path, "frontend": "ia_amt:default",
                    "separated": separated,
                    **({"separators": {

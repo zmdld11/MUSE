@@ -2,6 +2,7 @@ import { Midi } from "@tonejs/midi";
 import type { Note, NotationMeta, Project, Track } from "@/entities/project/types";
 import { usePlayerStore } from "@/entities/project/store";
 import { audioEngine } from "@/features/playback/audioEngine";
+import { midiEngine } from "@/features/playback/midiEngine";
 import {
   CLASS_FAMILY,
   GM_NAMES,
@@ -25,9 +26,17 @@ interface RawProject {
   notation?: NotationMeta;
 }
 
-/** MIDI 字节 → 轨道列表（GM 音色 + 文件名提示双路判定族与颜色） */
+/** MIDI 字节 → 轨道列表（GM 音色 + 文件名提示双路判定族与颜色）；
+ * 单个文件解析失败跳过不致命（曾因 fetch 到 SPA 回退 HTML 抛异常卡死
+ * loading——2026-08-27） */
 function tracksFromMidi(midName: string, bytes: ArrayBuffer): Track[] {
-  const midi = new Midi(bytes);
+  let midi: Midi;
+  try {
+    midi = new Midi(bytes);
+  } catch (e) {
+    console.warn(`[load] MIDI 解析失败，跳过 ${midName}`, e);
+    return [];
+  }
   const hint = filenameHint(midName);
   const tracks: Track[] = [];
   midi.tracks.forEach((tr, i) => {
@@ -87,6 +96,12 @@ export function parseNotationMeta(
 
 async function buildAndLoad(raw: RawProject): Promise<Project> {
   const store = usePlayerStore.getState();
+  // 换曲先停所有引擎并卸载旧曲 MIDI 音色：audioEngine.load 只停音频源；
+  // midiEngine 旧曲音色驻留会让 loaded=true 跳过重载，且旧轨 id 对不上
+  // 被可见性开关全静音（2026-08-27 两连修："切歌放旧曲"/"没加载音色"）
+  audioEngine.pause();
+  audioEngine.seek(0);
+  midiEngine.unload();
   store.setLoading("解析 MIDI…");
   const tracks = raw.mids.flatMap((m) => tracksFromMidi(m.name, m.bytes));
   let bpm: number | undefined;
@@ -171,40 +186,67 @@ export async function loadWebFiles(files: File[]): Promise<void> {
   await buildAndLoad(raw);
 }
 
-/** 演示曲目（public/demo，Tauri 与浏览器都能加载；index.json 清单优先，多乐器轨） */
-export async function loadDemoProject(): Promise<void> {
+/** 演示曲目（public/demo；v2 多曲清单 {version:2,songs:[…]} 每曲一子目录，
+ * 旧单曲格式回退根目录加载。songId 省略 = 清单第一首） */
+export async function loadDemoProject(songId?: string): Promise<void> {
+  let base = "/demo";
   let midNames = ["guitar.mid"];
+  let audioName = "05_kyomu_vocal.flac";
+  let songName = "虚無の先で愛を見つける（演示）";
   try {
     const r = await fetch("/demo/index.json");
     if (r.ok) {
-      const idx = (await r.json()) as { mids?: string[] };
-      if (Array.isArray(idx.mids) && idx.mids.length > 0) midNames = idx.mids;
+      const idx = (await r.json()) as {
+        version?: number;
+        songs?: { id: string; name?: string; dir?: string; audio?: string;
+                  mids?: string[] }[];
+        mids?: string[];
+        audio?: string;
+        name?: string;
+      };
+      if (Array.isArray(idx.songs) && idx.songs.length > 0) {
+        const pick =
+          idx.songs.find((s) => s.id === songId) ?? idx.songs[0];
+        base = `/demo/${pick.dir ?? pick.id}`;
+        if (Array.isArray(pick.mids) && pick.mids.length > 0) midNames = pick.mids;
+        if (typeof pick.audio === "string" && pick.audio) audioName = pick.audio;
+        if (typeof pick.name === "string" && pick.name) songName = pick.name;
+        usePlayerStore.getState().setDemoSongs(
+          idx.songs.map((s) => ({ id: s.id, name: s.name ?? s.id })),
+          pick.id,
+        );
+      } else {
+        if (Array.isArray(idx.mids) && idx.mids.length > 0) midNames = idx.mids;
+        if (typeof idx.audio === "string" && idx.audio) audioName = idx.audio;
+        if (typeof idx.name === "string" && idx.name) songName = idx.name;
+        usePlayerStore.getState().setDemoSongs([], null);
+      }
     }
   } catch {
     /* 清单缺失时退回单轨 */
   }
   const [audioR, infoR, ...midRs] = await Promise.all([
-    fetch("/demo/05_kyomu_vocal.flac"),
-    fetch("/demo/info.json").catch(() => null),
-    ...midNames.map((name) => fetch(`/demo/${name}`).catch(() => null)),
+    fetch(`${base}/${audioName}`),
+    fetch(`${base}/info.json`).catch(() => null),
+    ...midNames.map((name) => fetch(`${base}/${name}`).catch(() => null)),
   ]);
   if (!audioR.ok) throw new Error("演示数据缺失（public/demo）");
   const mids = midNames
     .map((name, i) => ({ name, res: midRs[i] }))
     .filter((m) => m.res && m.res.ok);
   if (mids.length === 0) throw new Error("演示 MIDI 缺失（public/demo）");
-  // 记谱层产物（public/demo/notation）
+  // 记谱层产物（每曲 notation/ 子目录）
   let notation: NotationMeta | undefined;
   try {
-    const nr = await fetch("/demo/notation/notation.json");
+    const nr = await fetch(`${base}/notation/notation.json`);
     if (nr.ok) {
-      notation = parseNotationMeta(await nr.text(), { kind: "url", baseUrl: "/demo" });
+      notation = parseNotationMeta(await nr.text(), { kind: "url", baseUrl: base });
     }
   } catch {
     /* 无记谱输出 */
   }
   await buildAndLoad({
-    name: "虚無の先で愛を見つける（演示）",
+    name: songName,
     audioBytes: await audioR.arrayBuffer(),
     mids: await Promise.all(
       mids.map(async (m) => ({ name: m.name, bytes: await m.res!.arrayBuffer() })),

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { Project, ScoreMode, ViewMode } from "./types";
+import type { DemoSong, Project, ScoreMode, ViewMode } from "./types";
 
 export type PlaybackSource = "midi" | "audio" | "mix";
 export type ThemeName = "dark" | "light";
@@ -33,6 +33,8 @@ interface PlayerState {
   viewMode: ViewMode;
   scoreTrack: string | null; // 乐谱页展示轨（instrument_class；null = 首轨）
   scoreMode: ScoreMode; // 乐谱量化/忠实双模式（记谱规则v1 §4）
+  demoSongs: DemoSong[]; // 演示曲库（public/demo v2 清单；空 = 单曲/无）
+  activeDemoId: string | null; // 当前加载的演示曲目 id
 
   setProject: (p: Project | null) => void;
   setLoading: (msg: string | null) => void;
@@ -45,6 +47,7 @@ interface PlayerState {
   setViewMode: (v: ViewMode) => void;
   setScoreTrack: (cls: string | null) => void;
   setScoreMode: (m: ScoreMode) => void;
+  setDemoSongs: (songs: DemoSong[], activeId: string | null) => void;
   toggleMute: (trackId: string) => void;
   toggleSolo: (trackId: string) => void;
 }
@@ -61,6 +64,8 @@ export const usePlayerStore = create<PlayerState>((set) => ({
   viewMode: "roll",
   scoreTrack: null,
   scoreMode: initialScoreMode(),
+  demoSongs: [],
+  activeDemoId: null,
 
   setProject: (p) =>
     set({
@@ -91,6 +96,7 @@ export const usePlayerStore = create<PlayerState>((set) => ({
     localStorage.setItem("muse-score-mode", m);
     set({ scoreMode: m });
   },
+  setDemoSongs: (songs, activeId) => set({ demoSongs: songs, activeDemoId: activeId }),
   toggleMute: (trackId) =>
     set((s) => {
       if (!s.project) return s;

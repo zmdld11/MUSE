@@ -90,7 +90,8 @@ def _resolve_checkpoint(model_type: str, repo: Path) -> Path:
 
 def transcribe_ia_amt(audio_path: str, model_type: str = "guitar",
                       device: str | None = None,
-                      velocity: int = 100) -> dict:
+                      velocity: int = 100,
+                      note_bias: float = 0.0) -> dict:
     """转写一个音频文件 → {"notes": [...], "instrument_counts": {...}}。
 
     note 字段与 ByteDance/Riley 前端对齐：onset/offset（秒）、pitch、velocity、
@@ -104,6 +105,10 @@ def transcribe_ia_amt(audio_path: str, model_type: str = "guitar",
     from instrument_agnostic_amt.taxonomy.instrument_classes import INSTRUMENT_CLASSES
 
     model, mcfg, settings, dev = _load(model_type, device)
+    if float(note_bias) != 0.0:
+        # frozen dataclass，replace 拷贝覆盖，不污染进程级模型缓存
+        import dataclasses
+        settings = dataclasses.replace(settings, note_bias=float(note_bias))
     waveform, _sr_in, _ch = _load_audio(Path(audio_path),
                                         target_sample_rate=int(mcfg.sample_rate))
     with torch.no_grad():

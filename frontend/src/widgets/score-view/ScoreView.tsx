@@ -2,17 +2,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { FileMusic, Loader2 } from "lucide-react";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { usePlayerStore } from "@/entities/project/store";
-import type { NotationMeta, ScoreMode } from "@/entities/project/types";
+import type { NotationMeta } from "@/entities/project/types";
 import { activeEngine } from "@/features/playback/control";
 import { tauriReadBytes } from "@/features/library/fileAccess";
 import { familyColor } from "@/shared/theme/instrumentColors";
-import { Segmented } from "@/shared/ui/controls";
 import { cn } from "@/shared/utils/cn";
 
 /**
  * 乐谱视图（M4）：OSMD 渲染管线 notation/ 产物。
  * - 轨道页签切换单乐器谱（乐器面板行点击也会切）
- * - 量化/忠实双模式切换（记谱规则v1 §4）
  * - 播放光标联动：OSMD cursor 逐步推进，与卷帘共享同一条 playback 时间轴；
  *   时间→步数映射在渲染后用 iterator 时间戳走一遍建立
  */
@@ -54,8 +52,6 @@ function ScoreToolbar({ notation }: { notation: NotationMeta }) {
   const theme = usePlayerStore((s) => s.theme);
   const scoreTrack = usePlayerStore((s) => s.scoreTrack);
   const setScoreTrack = usePlayerStore((s) => s.setScoreTrack);
-  const scoreMode = usePlayerStore((s) => s.scoreMode);
-  const setScoreMode = usePlayerStore((s) => s.setScoreMode);
 
   const active = scoreTrack ?? notation.tracks[0].instrumentClass;
 
@@ -103,14 +99,6 @@ function ScoreToolbar({ notation }: { notation: NotationMeta }) {
           {notation.key}
         </span>
       ) : null}
-      <Segmented
-        options={[
-          { value: "quantized", label: "量化" },
-          { value: "faithful", label: "忠实" },
-        ]}
-        value={scoreMode}
-        onChange={(v) => setScoreMode(v as ScoreMode)}
-      />
     </div>
   );
 }
@@ -118,7 +106,6 @@ function ScoreToolbar({ notation }: { notation: NotationMeta }) {
 function ScoreCanvas({ notation }: { notation: NotationMeta }) {
   const project = usePlayerStore((s) => s.project);
   const scoreTrack = usePlayerStore((s) => s.scoreTrack);
-  const scoreMode = usePlayerStore((s) => s.scoreMode);
   const active = scoreTrack ?? notation.tracks[0].instrumentClass;
   const trackMeta = useMemo(
     () => notation.tracks.find((t) => t.instrumentClass === active),
@@ -147,10 +134,7 @@ function ScoreCanvas({ notation }: { notation: NotationMeta }) {
 
     (async () => {
       try {
-        const file =
-          scoreMode === "faithful"
-            ? `${active}.faithful.musicxml`
-            : `${active}.musicxml`;
+        const file = `${active}.musicxml`;
         let xml: string;
         if (notation.kind === "fs") {
           xml = new TextDecoder().decode(
@@ -188,11 +172,7 @@ function ScoreCanvas({ notation }: { notation: NotationMeta }) {
 
         // 时间→步数表：iterator 逐步走一遍（时间戳为谱面相对四分音符位置）
         const bpm = project?.bpm ?? 120;
-        const offsetBar =
-          scoreMode === "faithful"
-            ? Math.floor((trackMeta.firstOnsetSec * bpm) / 60 / 4)
-            : trackMeta.minBar;
-        const offsetSec = offsetBar * 4 * (60 / bpm);
+        const offsetSec = trackMeta.minBar * 4 * (60 / bpm);
         const cursor = osmdRef.current.cursor;
         cursor.show();
         cursor.reset();
@@ -229,7 +209,7 @@ function ScoreCanvas({ notation }: { notation: NotationMeta }) {
     return () => {
       cancelled = true;
     };
-  }, [notation, trackMeta, active, scoreMode, project?.bpm]);
+  }, [notation, trackMeta, active, project?.bpm]);
 
   // 播放光标联动（rAF；暂停时也跟随进度条拖拽）
   useEffect(() => {

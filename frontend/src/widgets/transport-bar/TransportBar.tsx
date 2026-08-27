@@ -21,7 +21,7 @@ import {
   setPlaybackRate,
   togglePlay,
 } from "@/features/playback/control";
-import { openDirectoryProject } from "@/features/library/loadProject";
+import { openDirectoryProject, loadDemoProject } from "@/features/library/loadProject";
 import { IconButton, Segmented } from "@/shared/ui/controls";
 import { formatTime } from "@/shared/utils/cn";
 
@@ -39,6 +39,8 @@ export function TransportBar() {
   const setViewMode = usePlayerStore((s) => s.setViewMode);
   const followMode = usePlayerStore((s) => s.followMode);
   const setFollowMode = usePlayerStore((s) => s.setFollowMode);
+  const demoSongs = usePlayerStore((s) => s.demoSongs);
+  const activeDemoId = usePlayerStore((s) => s.activeDemoId);
   const fillRef = useRef<HTMLDivElement>(null);
   const knobRef = useRef<HTMLDivElement>(null);
 
@@ -132,6 +134,26 @@ export function TransportBar() {
       <span className="tnum w-[92px] shrink-0 text-center text-xs text-content-2">
         {formatTime(currentTime)} / {formatTime(duration)}
       </span>
+
+      {/* 演示曲库切歌（多曲清单时出现） */}
+      {demoSongs.length > 1 && (
+        <select
+          title="演示曲目"
+          value={activeDemoId ?? ""}
+          onChange={(e) => {
+            void loadDemoProject(e.target.value).catch(() => {
+              usePlayerStore.getState().setLoading(null);
+            });
+          }}
+          className="h-8 max-w-[180px] shrink-0 cursor-pointer rounded-md border-none bg-surface-1 px-2 text-xs text-content-1 outline-none hover:bg-surface-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+        >
+          {demoSongs.map((s) => (
+            <option key={s.id} value={s.id} style={{ background: "var(--color-surface-3)" }}>
+              {s.name}
+            </option>
+          ))}
+        </select>
+      )}
 
       {/* 倍速 */}
       <select

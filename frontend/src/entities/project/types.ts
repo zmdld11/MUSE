@@ -58,3 +58,9 @@ export interface NotationMeta {
 
 export type ViewMode = "roll" | "score";
 export type ScoreMode = "quantized" | "faithful";
+
+/** 演示曲库条目（public/demo v2 清单） */
+export interface DemoSong {
+  id: string; // 子目录名（稳定 key）
+  name: string; // 显示名（音频文件名 stem）
+}

@@ -15,6 +15,10 @@ class Config:
         # GuitarSet 0.9227 / 東の空 stem 0.3863 / 虚無の先严格 45.9%）。
         self.GUITAR_FRONTEND = os.environ.get("MUSE_GUITAR_FRONTEND", "ia_amt")
         self.IA_AMT_TYPE = os.environ.get("MUSE_IA_AMT_TYPE", "guitar_v1_5")
+        # ia-amt note-bias 工作点（2026-08-25 扫描接入）：Semi-CRF 区间分数常数
+        # 偏置，正值=更多音符（召回↑精度↓）。混音域数量比 ~0.45 偏保守漏报、
+        # 干净域 0.94 健康——只针对混音域调；扫描数据 output/note_bias_sweep/。
+        self.IA_NOTE_BIAS = float(os.environ.get("MUSE_IA_NOTE_BIAS", "0.0"))
         # 吉他线输入：raw=原始混音直推（矩阵验证吉他主导曲可行，免 demucs 伪影）；
         # stem=htdemucs_6s 分离轨（暂留，VER-SEP 本地接入后升级 versep 模式）
         self.GUITAR_ENABLE = os.environ.get("MUSE_GUITAR_ENABLE", "1") not in ("0", "false")
@@ -28,8 +32,10 @@ class Config:
         # 受控基准）VER-SEP +12.6pt / AUPRC 0.250→0.525，且 VER-SEP 2.0 下游
         # F1 0.531→0.597。默认混合模式：吉他吃分离红利，其余类保直通精度。
         self.MULTI_SEPARATION = os.environ.get("MUSE_MULTI_SEPARATION", "versep_guitar")
-        # 记谱层模式（阶段19）：quantized | faithful | both（规则见记谱规则v1.md §4）
-        self.NOTATION_MODE = os.environ.get("MUSE_NOTATION_MODE", "both")
+        # 记谱层模式（阶段19）：quantized | faithful | both（规则见记谱规则v1.md §4）。
+        # 产品默认 quantized——faithful=转写逐字直译谱（64/128 分碎休止），
+        # 只作记谱层调试出口（2026-08-27 用户拍板：谱面不展示忠实模式）。
+        self.NOTATION_MODE = os.environ.get("MUSE_NOTATION_MODE", "quantized")
         self.PITCH_MODEL_MONO = "crepe"
         self.SR = 44100
         self.MODEL_SR = 22050    # SR for our trained model (mel spectrogram input)

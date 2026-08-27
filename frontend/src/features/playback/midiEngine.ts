@@ -70,6 +70,16 @@ export class MidiEngine {
     }
   }
 
+  /** 换曲卸载：停声并清空旧曲音色/音符（loaded=false，下次播放走
+   * ensureMidiLoaded 重新加载——否则旧曲音色驻留，新曲轨道 id 对不上
+   * 被可见性开关全静音 = "切歌后没加载乐器音色"的哑巴状态） */
+  unload(): void {
+    this.stopAll();
+    this.tracks = [];
+    this.durationVal = 0;
+    this.startPos = 0;
+  }
+
   /** 主音量（叠加模式下降增益防削波） */
   setMasterGain(v: number): void {
     if (this.master) this.master.gain.value = v;

@@ -1,8 +1,10 @@
-"""VER-SEP 2.0 吉他分离（mel-band-roformer，MSST 子进程推理，--bigshifts 4）。
+"""VER-SEP 3.0b 吉他分离（mel-band-roformer，MSST 子进程推理，--bigshifts 4）。
 
-ckpt = VERSEP2.0 ep9（comp 硬区 SDR 11.42 vs 1.1 的 8.36；F2 112 对整体 SI-SDR
-+6.2dB、最差四分位 +10.4dB、下游 F1 0.531->0.597，112/112 零回退；干净独奏透传
-29.9->38.9dB）。验收记录见 findings 2026-08-25。
+ckpt = VERSEP3.0b ep10（GOAT 硬区 valid SDR 12.33 vs 3.0-a 12.15 / 2.0 10.99；
+全门 note@50：F2' 42 对 0.7399（全臂最高，amp1 弱点修复至 0.678=v11 水平）、
+F2 112 对 0.5852、GS clean 0.9035 带内零损伤——Pareto 无争议采纳。NAM 音色轴
+（tone3000 渲染）下游增益 +0.51pt ≈ 官方 5 音色轴（+0.05pt）的 10 倍。
+验收记录见 findings 2026-08-27。
 
 产物缓存 cache_dir/<输入名>/Guitar.flac（MSST 默认模板 {file_name}/{instr}），
 重跑免分离。ckpt/MSST 缺失返回 None，上层回退 demucs guitar stem。
@@ -25,7 +27,7 @@ VERSEP_DIR = os.path.join(os.path.dirname(SE_ROOT), "source_separation", "versep
 CKPT_PATH = os.path.join(
     VERSEP_DIR,
     os.environ.get("MUSE_VERSEP_CKPT",
-                   "VERSEP2.0_roformer_guitar_ep9_sdr11.4248.ckpt"))
+                   "VERSEP3.0b_roformer_guitar_ep10_sdr12.3279.ckpt"))
 if not os.path.isabs(CKPT_PATH):
     CKPT_PATH = os.path.join(VERSEP_DIR, CKPT_PATH)
 CONFIG_PATH = os.path.join(VERSEP_DIR, "config_guitar_finetune_v1.yaml")
@@ -42,7 +44,15 @@ def _fs_resolve(path: str) -> str | None:
 
 
 def separate_guitar(audio_path: str, cache_dir: str) -> str | None:
-    """分离吉他 stem；返回产物路径，ckpt/MSST 缺失时返回 None（上层回退）。"""
+    """分离吉他 stem；返回产物路径，ckpt/MSST 缺失时返回 None（上层回退）。
+
+    入口先 absolutize：MSST 子进程 cwd=external/MSST，相对路径的
+    input_folder/store_dir 会在子进程侧解析到错误位置 → "Total files
+    found: 0"（2026-08-27 批量 10 首全挂的根因；kyomu 曾因分离缓存
+    命中而掩盖此 bug）。
+    """
+    audio_path = os.path.abspath(audio_path)
+    cache_dir = os.path.abspath(cache_dir)
     os.makedirs(cache_dir, exist_ok=True)
     for hit in glob.glob(os.path.join(cache_dir, "*", "Guitar.*")):
         logger.info("  [versep] cached: %s", hit)

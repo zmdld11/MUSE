@@ -4,12 +4,17 @@
 准入判定）；产出 = notation/notation.json（NotationScore，忠实+量化双模式
 字段）+ notation/solo/{class}.musicxml。规则依据 markdown/记谱规则v1.md：
 
-- 量化：全局池化 onset 对齐（quantize_timing 分段偏移搜索，16 分+三连音
-  候选），记谱位置 1/48 四分音符精度网格（12/48=16 分，32/48=8 分三连音）。
+- 量化（时值 v3，音头保持）：全体池化音头联合拟合 1/12 格的**全局相位
+  φ**（Cemgil 2003 量化=推断口径：格点 MAP = 最小位移吸附），φ 平移后
+  单次吸附到 1/12 网格。替换 v2 的「quantize_onsets 秒域分段网格 + 记谱层
+  绝对 1/12 网格」双重吸附——两重网格相位不对齐时每个音头被系统性平移
+  （kyomu 实测 p90 ~50ms）；单网格后位移上限恒 1/24 四分（半格）。
 - 节奏简化（记谱规则v1 §3.4，治"谱脏"）：量化后三步——①同时性聚类
   （扫弦 stagger 归一为和弦）；②时值再分配（onset 可靠、offset 不可靠，
-  时值由 gap/ratio 语境决定：连奏填满、断奏缩短、中间向下取）；③小节内
-  单值分解（只跨小节才 tie，链 ≤2 片；持续音封顶一小节）。
+  时值由 gap/ratio 语境决定：连奏填满、断奏/中间态在间隔 ≤1 拍时同样
+  填满到声部内下一音头——演奏短奏属于表情层，谱面写节拍值，休止符只
+  留给短语级沉默；间隔 >1 拍才写缩短值+休止）；③小节内单值分解（只跨
+  小节才 tie，链 ≤2 片；持续音封顶一小节）。
 - 拼谱后守护：量化域同音高同声部冲突截断/去重（数据层截断在量化后可能
   重新碰撞）。
 - TAB：music21 无 TabStaff，TAB 谱用 MusicXML <technical><string>/<fret>
@@ -24,6 +29,7 @@ import os
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from fractions import Fraction
+from pathlib import Path
 
 from music21 import (chord as m21chord, clef as m21clef, instrument as m21inst,
                      interval as m21interval, key as m21key, layout, meter as m21meter,
@@ -31,7 +37,6 @@ from music21 import (chord as m21chord, clef as m21clef, instrument as m21inst,
 
 from src import guitar_tab, voice_assign
 from src.key_estimate import estimate_key
-from src.quantize_timing import quantize_onsets
 
 logger = logging.getLogger(__name__)
 
@@ -64,26 +69,133 @@ ALL_DURS = sorted({
 })
 MIN_DUR = Fraction(1, 4)
 
+# 时值代价（时值 v2，2026-08-27 Phase-1 拍板"分子尽量是 1"的可计算化）：
+# 纯二分单位分数 0 < 单附点 1 < 三连音值 2；连音链每多一片 +1。
+# 片段选择一律最小总代价（同代价时取片数少、再取首片大）——
+# legato 精确填满不留碎休止，detached/middle 单值优先单位分数。
+UNIT_DURS = frozenset({Fraction(1, 4), Fraction(1, 2), Fraction(1),
+                       Fraction(2), Fraction(4)})
+DOTTED_DURS = frozenset({Fraction(3, 4), Fraction(3, 2), Fraction(3)})
+_TRIPLET_SINGLES = frozenset({Fraction(1, 3), Fraction(2, 3),
+                              Fraction(1, 12), Fraction(1, 6)})
+
+
+def _dur_cost(d: Fraction) -> int:
+    if d in UNIT_DURS:
+        return 0
+    if d in DOTTED_DURS:
+        return 1
+    if d in _TRIPLET_SINGLES:
+        return 2
+    return 3  # 其余合法单值（7/4 双附点等）：最高代价
+
+
+def _largest_unit(bound: Fraction, vocab: list[Fraction]) -> Fraction:
+    """断奏/中间态单值：词表内 ≤ bound 的最小代价值（同代价取最大）。
+    无单位分数可用时退让到附点/三连音——bound < 1/4 时兜底 MIN_DUR。"""
+    cands = [d for d in vocab if d <= bound]
+    if not cands:
+        return MIN_DUR
+    best = min(cands, key=lambda d: (_dur_cost(d), -d))
+    return max(MIN_DUR, best)
+
+
+def _choose_fragments(onset_ql: Fraction, bound: Fraction,
+                      ql_per_measure: Fraction = Fraction(4),
+                      vocab: list[Fraction] | None = None,
+                      max_pieces: int = 3) -> list[Fraction]:
+    """连奏精确填满 bound 的最小代价片段链（时值 v2 核心）。
+
+    约束：片段不穿小节线（小节内可多片，跨小节必在小节线处切）；
+    词表 = 语境词表 ∪ {1/12, 1/6}（奇数 twelfth 的精确填充需要，
+    两者均为合法单值）。链超 max_pieces 片时退化为最少片数解。
+    """
+    base = list(vocab if vocab is not None else ALL_DURS)
+    fill_vocab = sorted(set(base) | {Fraction(1, 12), Fraction(1, 6)},
+                        reverse=True)
+    unit = Fraction(1, 12)
+    if bound <= 0:
+        return [MIN_DUR]
+
+    # 按小节线切 bound，逐段精确填充（片段永不跨小节线）
+    segments: list[tuple[Fraction, Fraction]] = []  # (start, end)
+    cur = onset_ql
+    rem = bound
+    while rem > 0:
+        m_end = (cur // ql_per_measure + 1) * ql_per_measure
+        span = min(rem, m_end - cur)
+        segments.append((cur, span))
+        cur += span
+        rem -= span
+
+    def dp_exact(span: Fraction, by_pieces: bool = False) -> list[Fraction] | None:
+        """精确填满 span 的 DP。默认最小(代价,片数)；by_pieces=True 时
+        最小(片数,代价)——超长链的降级目标，供 max_pieces 回退用。"""
+        k = int(span / unit)
+        if k <= 0:
+            return []
+        costs: list[tuple[int, int, list[Fraction]] | None] = [None] * (k + 1)
+        costs[0] = (0, 0, [])
+        for i in range(1, k + 1):
+            for p in fill_vocab:
+                u = int(p / unit)
+                if u <= i and costs[i - u] is not None:
+                    c, n, lst = costs[i - u]
+                    c2, n2 = (c + _dur_cost(p), n + 1)
+                    if by_pieces:
+                        c2, n2 = n2, c2
+                    cand = (c2, n2, [p] + lst)
+                    if costs[i] is None or cand[:2] < costs[i][:2]:
+                        costs[i] = cand
+        return costs[k][2] if costs[k] is not None else None
+
+    pieces: list[Fraction] = []
+    for _start, span in segments:
+        seg = dp_exact(span)
+        if seg is None:  # 理论不发生（1/12 兜底片在词表内）
+            return _fit_fragments(onset_ql, bound, ql_per_measure, vocab)
+        pieces.extend(seg)
+    if len(pieces) > max_pieces:
+        # 代价换可读性：改按"分段内最少片数"重解——绝不能退回不分段的
+        # _rest_pieces（无小节线约束，曾在 15/4 拍处产出 4 拍全音符越线，
+        # 回归门 43 处跨度溢出的根因，2026-08-27）。
+        alt: list[Fraction] = []
+        for _start, span in segments:
+            seg = dp_exact(span, by_pieces=True)
+            if seg is None:
+                alt = []
+                break
+            alt.extend(seg)
+        if alt and len(alt) < len(pieces):
+            return alt
+    return pieces or [MIN_DUR]
+
 # 节奏简化常量（记谱规则v1 §3.4）
 SUSTAIN_CAP = Fraction(4)   # 持续音封顶一小节（4/4；用户拍板）
 LEGATO_RATIO = Fraction(85, 100)  # raw 时值 ≥ gap×0.85 → 连奏填满
 DETACHED_RATIO = Fraction(1, 2)   # raw 时值 < gap×0.5 → 断奏缩短
+# 休止符削减（时值 v3，2026-08-27）：断奏/中间态在声部内间隔 ≤1 拍时同样
+# 填满到下一音头（演奏短奏=表情层，谱面写节拍值；休止只留短语级沉默）。
+# 间隔 >1 拍（换气/乐句空档）保留缩短值+休止——乐理上乐句结构需要可见。
+FILL_GAP_MAX = Fraction(1)
+# score_mid 同音高连排起音保护：填满写法使相邻同音高 MIDI 连成长音（听感
+# =漏掉重复音头），起音前留 30ms release 让攻击重新触发（30ms 对节拍
+# 观感不可闻）。跨音高不需要——音高变化本身就是新起音。
+RELEASE_SEC = 0.03
 CLUSTER_SEC = 0.040         # 同时性聚类窗口（扫弦 stagger <40ms）
 SEAM_SEC = 0.040            # 量化后接缝判定窗口（§3.2 遗留）
 
-# 时值 → (type, 附点数, time-modification) —— 手写 TAB XML 用
-DUR_TO_TYPE = {
-    Fraction(1, 4): ("16th", 0, None),
-    Fraction(1, 3): ("eighth", 0, (3, 2)),
-    Fraction(1, 2): ("eighth", 0, None),
-    Fraction(2, 3): ("quarter", 0, (3, 2)),
-    Fraction(3, 4): ("eighth", 1, None),
-    Fraction(1, 1): ("quarter", 0, None),
-    Fraction(3, 2): ("quarter", 1, None),
-    Fraction(2, 1): ("half", 0, None),
-    Fraction(3, 1): ("half", 1, None),
-    Fraction(4, 1): ("whole", 0, None),
-}
+# 时值 → (type, 附点数, time-modification(actual,normal)) —— 手写 TAB XML 用。
+# 程序化生成全集（base×附点×3:2 三连音），保证任何合法单值都有正确记谱类型；
+# 旧表只覆盖 10 个值，1/6、4/3 等会静默落成错误的 type（2026-08-25 TAB 修复）。
+DUR_TO_TYPE: dict[Fraction, tuple[str, int, tuple[int, int] | None]] = {}
+for _val, _name in ((Fraction(4), "whole"), (Fraction(2), "half"),
+                    (Fraction(1), "quarter"), (Fraction(1, 2), "eighth"),
+                    (Fraction(1, 4), "16th"), (Fraction(1, 8), "32nd")):
+    for _dots in (0, 1, 2):
+        _mult = Fraction(2) - Fraction(1, 2 ** _dots)
+        DUR_TO_TYPE[_val * _mult] = (_name, _dots, None)
+        DUR_TO_TYPE[_val * _mult * Fraction(2, 3)] = (_name, _dots, (3, 2))
 
 STEP_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 SHARPED = {1, 3, 6, 8, 10}
@@ -97,6 +209,189 @@ def _ql(sec: float, bpm: float) -> Fraction:
 def _snap(fr: Fraction, denom: int) -> Fraction:
     """吸附到 1/denom 四分音符网格。"""
     return Fraction(round(fr * denom), denom)
+
+
+def _prior_snap_units(x: float) -> int:
+    """格点计数 → 整数（节拍先验吸附；Cemgil 2003 位置先验 p(τ mod 1)
+    的离散化：整拍 0.80 > 半拍 0.15 > 三连 0.008）。
+
+    演奏前置/滞后 ≤ 亚记谱精度（~0.85 格 ≈ 50ms）时吸收到更粗的格点
+    （整拍/半拍/八分）——人类刻谱同样把 50ms 的 anticipation 记在拍上
+    （canon 实测第二拍和弦稳定 1.917 而非 2.0）；其余位置取最近格。
+    """
+    import math
+    lo, hi = math.floor(x), math.ceil(x)
+    if lo == hi:
+        return int(lo)
+    dlo, dhi = x - lo, hi - x
+
+    def _grade(k: int) -> int:
+        if k % 12 == 0:
+            return 4          # 整拍
+        if k % 6 == 0:
+            return 3          # 半拍
+        if k % 3 == 0:
+            return 2          # 八分（含三连 4/12）
+        return 1 if k % 2 == 0 else 0
+
+    def _cost(k: int, d: float) -> float:
+        bonus = {4: 0.85, 3: 0.7, 2: 0.5}.get(_grade(k), 0.0)
+        return (d - bonus) if d <= 0.9 else d
+
+    return int(lo if _cost(lo, dlo) <= _cost(hi, dhi) else hi)
+
+
+def _fit_grid_map(notes: list[dict], bpm: float):
+    """时值 v3.1 音头映射：全局 (bpm,φ) 联合精修 + 分段线性速度漂移跟踪。
+
+    模型 = Cemgil 2003（量化=推断，速度偏差平滑游走）的分段化：谱面格点
+    计数 k(t) ≈ a·t+b；①先联合精修全局斜率 a 与相位 φ（目标 = 全体 onset
+    到最近 1/12 格点的平均距离最小，稀疏曲目改善 <15% 时拒绝改速防混叠
+    ——1/12 稠密格在无相位优化时存在 ±3% 量级的假峰，kyomu 实测踩过）；
+    ②再以 8 小节窗/2 小节 hop 的 Theil-Sen 稳健回归跟踪局部斜率（钳制
+    ±4%，中位数截距），吸收 rubato 速度游走；音符级偏差（真实切分/转写
+    噪声）不被吸收。背景：单一全局速度对演奏型录音（canon 实测和弦每
+    小节右滑 ~1/12 拍、累计 ~7 拍）结构必然崩坏——小节线切进和弦。
+
+    返回 (bpm_refined, ql_map, resid_map, meta)；ql_map(t) → 吸附后 QL
+    （Fraction，1/12 网格、非负），resid_map(t) → 吸附位移（QL）。
+    """
+    import numpy as np
+    ts = np.array(sorted({float(n["onset"]) for n in notes}))
+    a0 = bpm / 60.0 * 12  # 全局斜率：格点计数/秒
+
+    def cost_with_phase(a: float) -> tuple[float, float]:
+        d = (ts * a) % 1.0
+        best = None
+        for p in np.unique(d):
+            dd = np.abs(d - p)
+            c = float(np.minimum(dd, 1 - dd).mean())
+            if best is None or c < best[0]:
+                best = (c, float(p))
+        return best  # (cost, phase)
+
+    base_c, _phi = cost_with_phase(a0)
+    best_c, a_ref = base_c, a0
+    for f in np.arange(0.960, 1.0401, 0.0004):
+        c, _ = cost_with_phase(a0 * f)
+        if c < best_c - 1e-6:
+            best_c, a_ref = c, a0 * f
+    if base_c - best_c < 0.15 * max(base_c, 1e-9):  # 稀疏防混叠
+        a_ref, best_c = a0, base_c
+    bpm_ref = float(a_ref / 12 * 60)
+    _, phi = cost_with_phase(a_ref)
+
+    # 分段线性 F(t)：滑动窗直接做 (斜率, 相位) 格点拟合——窗内 onset 应
+    # 密集落在 a·t+b 的整点上；相邻窗整数解缠（相位圆环歧义 ±1 格），
+    # 单调保护。第一版教训：用 round(全局直线) 的阶梯整数做锚会丢相位
+    # （直线骑格缝，canon 实测中位残差恰好半格 154ms）且斜率被污染。
+    bar_sec = 48.0 / a_ref
+    win, hop = 8 * bar_sec, 2 * bar_sec
+    centers: list[float] = []
+    lines: list[tuple[float, float]] = []  # (a, b)
+    c_pos = float(ts[0]) + win / 2
+    while c_pos <= float(ts[-1]) + win / 2 + 1e-9:
+        m = (ts >= c_pos - win / 2) & (ts <= c_pos + win / 2)
+        if int(m.sum()) >= 8:
+            tt = ts[m]
+            best = None
+            for a in np.linspace(0.96 * a_ref, 1.04 * a_ref, 41):
+                v = (tt * a) % 1.0
+                hist, _ = np.histogram(v, bins=48, range=(0.0, 1.0))
+                p = (int(np.argmax(hist)) + 0.5) / 48.0
+                dd = float(np.minimum((v - p) % 1.0,
+                                      1 - (v - p) % 1.0).mean())
+                if best is None or dd < best[0]:
+                    best = (dd, float(a), p)
+            centers.append(c_pos)
+            lines.append((best[1], -best[2]))
+        c_pos += hop
+
+    if not centers:  # 曲目过短 → 纯全局直线
+        def _line(t: float) -> float:
+            return a_ref * t - phi
+        F = _line
+        n_win = 0
+    else:
+        # 相邻窗解缠：当前窗直线在共享中心处对齐前窗（±0.5 格内取整）
+        for i in range(1, len(lines)):
+            a_p, b_p = lines[i - 1]
+            a_c, b_c = lines[i]
+            shift = round((a_p * centers[i] + b_p) - (a_c * centers[i] + b_c))
+            lines[i] = (a_c, b_c + shift)
+        xs = [float(ts[0])] + centers + [float(ts[-1])]
+        ys = [lines[0][0] * xs[0] + lines[0][1]] \
+            + [a * c + b for c, (a, b) in zip(centers, lines)] \
+            + [lines[-1][0] * xs[-1] + lines[-1][1]]
+        for i in range(1, len(xs)):  # 单调保护（窗间断层时保序）
+            if ys[i] <= ys[i - 1]:
+                ys[i] = ys[i - 1] + 1e-6 * (xs[i] - xs[i - 1] + 1e-6)
+        xs_a, ys_a = np.array(xs), np.array(ys)
+
+        def _F(t: float) -> float:
+            return float(np.interp(t, xs_a, ys_a))
+        F = _F
+        n_win = len(centers)
+
+    def ql_map(t: float) -> Fraction:
+        return Fraction(max(_prior_snap_units(F(t)), 0), 12)
+
+    def resid_map(t: float) -> Fraction:
+        v = F(t)
+        return Fraction(round(abs(v - _prior_snap_units(v)) * 2**20),
+                        2**20)
+
+    meta = {"bpm_refined": round(bpm_ref, 2),
+            "tempo_delta_pct": round((bpm_ref / bpm - 1) * 100, 2),
+            "n_windows": n_win}
+    return {"ql_map": ql_map, "resid_map": resid_map,
+            "cont": lambda t: F(t) / 12, "meta": meta}
+
+
+def _beat_sync_map(notes: list[dict], beat_times, pulse_sec: float,
+                   bpm: float):
+    """拍同步格点映射（时值 v3.2）：beat k → QL k·pulse_ql。
+
+    素材 = 音频节拍跟踪（src/beat_track.py）。librosa 拍是脉冲级（四分/
+    八分/半分），pulse_ql 吸附到 {1/4, 1/3, 1/2, 1, 2}；小节相位（弱起
+    偏移）由 onset 速度权重在小节内位置上投票（2 拍和声变化的曲子 p 与
+    p+bar/2 同分属正常，取先验最近）。返回结构与 _fit_grid_map 一致。
+    """
+    import numpy as np
+    bt = np.asarray(beat_times, dtype=float)
+    pulse_ql = min([0.25, 1 / 3, 0.5, 1.0, 2.0],
+                   key=lambda x: abs(x - pulse_sec / (60.0 / bpm)))
+    bar_pulses = int(round(4.0 / pulse_ql))
+    ks_idx = np.arange(len(bt), dtype=float)
+    ons = np.array([float(n["onset"]) for n in notes])
+    vel = np.array([float(n.get("velocity") or 64) for n in notes])
+    ks = np.interp(ons, bt, ks_idx)
+    best_p, best_s, best_mask = 0, -1.0, None
+    for p in range(bar_pulses):
+        d = np.abs((ks - p) % bar_pulses)
+        d = np.minimum(d, bar_pulses - d)
+        m = d < 0.35
+        s = float((vel * m).sum())
+        if s > best_s:
+            best_s, best_p, best_mask = s, p, m
+
+    # 亚脉冲对中已移除（2026-08-27 canon 事故第三弹）：δ 把簇钉在最近格点
+    # 上、反而离拍整整 1 格，节拍先验窗口够不着——_prior_snap_units 对
+    # 拍附近的簇（≤0.9 格）直接吸收，不再需要格内微调。
+    def cont(t: float) -> float:
+        return (float(np.interp(t, bt, ks_idx)) - best_p) * pulse_ql
+
+    def ql_map(t: float) -> Fraction:
+        return Fraction(max(_prior_snap_units(cont(t) * 12), 0), 12)
+
+    def resid_map(t: float) -> Fraction:
+        v = cont(t) * 12
+        return Fraction(round(abs(v - _prior_snap_units(v)) * 2**20),
+                        2**20)
+
+    return {"ql_map": ql_map, "resid_map": resid_map, "cont": cont,
+            "meta": {"pulse_ql": pulse_ql, "bar_phase_pulses": best_p,
+                     "n_beats": int(len(bt))}}
 
 
 def _nearest_duration(dur: Fraction) -> Fraction:
@@ -311,14 +606,16 @@ def _ensure_bar_room(events: list[dict],
 
 def _reassign_durations(events: list[dict], bpm: float,
                         ql_per_measure: Fraction = Fraction(4)) -> dict:
-    """节奏简化 Step2 时值再分配：onset 可靠、offset 不可靠 → 时值由
-    语境决定（记谱规则v1 §3.4）：
+    """节奏简化 Step2 时值再分配 v3（时值代价制）：onset 可靠、offset
+    不可靠 → 时值由语境决定（记谱规则v1 §3.4 + Phase-1 v2/v3）：
 
-    - 连奏（raw ≥ gap×0.85，实测 43%）：填满——≤ min(gap, 一小节) 的
-      最干净片段组合（跨小节才 tie）；
-    - 断奏（raw < gap×0.5，实测 46%）：缩短——≤ min(raw, 小节余量) 的
-      最大标准单值，剩余交休止符（拖尾消失）；
-    - 中间态：≤ min(raw, 一小节) 向下取。
+    - 连奏（raw ≥ gap×0.85，实测 43%）：**精确填满**——最小代价片段链
+      （单位分数优先、不穿小节线、≤3 片），不再留碎休止；
+    - 断奏/中间态：**间隔 ≤1 拍同样填满**到声部内下一音头（休止符削减，
+      v3）——演奏短奏属于表情层（Cemgil 2003：score 位置与表情偏差
+      解耦），谱面写节拍值，听感重复音头由 score_mid 的 release 间隙
+      保护；间隔 >1 拍（短语级沉默）保留单值缩短 + 休止——乐句结构
+      在谱面上应可见。
     """
     stats = {"legato": 0, "detached": 0, "middle": 0}
     shifted = _ensure_bar_room(events, ql_per_measure)
@@ -327,12 +624,27 @@ def _reassign_durations(events: list[dict], bpm: float,
     streams: dict[tuple[int, int], list[dict]] = defaultdict(list)
     for ev in events:
         streams[(ev["pitch"], ev["voice"])].append(ev)
+    # 同声部"下一个不同音头"（跨音高）：填充上界不能压过声部内其他音——
+    # 精确填满若只看同音高间隔，跨小节填满会与别的音高同声部重叠
+    # （回归门 143 处跨度溢出的根因，2026-08-27）。
+    voice_nexts: dict[int, list[Fraction]] = {}
+    for ev in events:
+        voice_nexts.setdefault(ev["voice"], []).append(ev["_onset_ql"])
+    for v in voice_nexts:
+        voice_nexts[v] = sorted(set(voice_nexts[v]))
+    import bisect
     for group in streams.values():
         group.sort(key=lambda e: e["_onset_ql"])
         for ev, nxt in zip(group, group[1:] + [None]):
             raw_ql = _ql(ev["offset_sec"] - ev["onset_sec"], bpm)
             next_ql = nxt["_onset_ql"] if nxt is not None else None
             vocab = _context_vocab(ev["_onset_ql"], next_ql)
+            m_idx = ev["_onset_ql"] // ql_per_measure
+            room_bar = (m_idx + 1) * ql_per_measure - ev["_onset_ql"]
+            # 声部内下一个不同音头（同时性和弦成员互相不算"下一个"）
+            onsets = voice_nexts[ev["voice"]]
+            i = bisect.bisect_right(onsets, ev["_onset_ql"])
+            voice_gap = (onsets[i] - ev["_onset_ql"]) if i < len(onsets) else None
             if nxt is not None:
                 gap_ql = nxt["_onset_ql"] - ev["_onset_ql"]
                 if gap_ql <= 0:
@@ -342,34 +654,51 @@ def _reassign_durations(events: list[dict], bpm: float,
                 gap_ql, ratio = None, LEGATO_RATIO  # 末音：按可填满处理但受 cap
             if ratio >= LEGATO_RATIO:
                 stats["legato"] += 1
-                bound = min(gap_ql, SUSTAIN_CAP) if gap_ql else SUSTAIN_CAP
-                ev["_frags_ql"] = _fit_fragments(ev["_onset_ql"], bound,
-                                                 ql_per_measure, vocab)
-            elif ratio < DETACHED_RATIO:
-                stats["detached"] += 1
-                m_idx = ev["_onset_ql"] // ql_per_measure
-                room_bar = (m_idx + 1) * ql_per_measure - ev["_onset_ql"]
-                ev["_frags_ql"] = [_floor_duration(min(raw_ql, room_bar), vocab)]
+                # 填充上界：同音高间隔 ∧ 声部内不同音头 ∧ 一小节；无约束侧兜底
+                bound = min(x for x in (gap_ql, voice_gap, SUSTAIN_CAP)
+                            if x is not None) if (gap_ql or voice_gap) else SUSTAIN_CAP
+                if nxt is None and voice_gap is None:  # 声部末音：不越小节线
+                    bound = min(SUSTAIN_CAP, room_bar)
+                ev["_frags_ql"] = _choose_fragments(ev["_onset_ql"], bound,
+                                                    ql_per_measure, vocab)
             else:
-                stats["middle"] += 1
-                ev["_frags_ql"] = _fit_fragments(
-                    ev["_onset_ql"], min(raw_ql, SUSTAIN_CAP),
-                    ql_per_measure, vocab)
+                stats["detached" if ratio < DETACHED_RATIO else "middle"] += 1
+                # 休止符削减（v3）：间隔 ≤1 拍填满到声部内下一音头；
+                # >1 拍的短语沉默保持"缩短值+休止"
+                if voice_gap is not None and voice_gap <= FILL_GAP_MAX:
+                    stats["gap_filled"] = stats.get("gap_filled", 0) + 1
+                    bound = min(voice_gap, SUSTAIN_CAP)
+                    ev["_frags_ql"] = _choose_fragments(
+                        ev["_onset_ql"], bound, ql_per_measure, vocab)
+                else:
+                    ev["_frags_ql"] = [_largest_unit(min(raw_ql, room_bar),
+                                                     vocab)]
     return stats
 
 
 def build_track_events(cls: str, notes: list[dict], raw_onsets: dict[int, float],
-                       bpm: float) -> list[dict]:
+                       bpm: float,
+                       ql_map=None, resid_map=None) -> list[dict]:
     """量化后的音笔记谱事件（含 tie 片段与弦品）。
 
-    管线：量化吸附 → 同时性聚类 → 量化域守护 → 接缝合并 → 时值再分配
-    → 小节内单值分解（记谱规则v1 §3.4 节奏简化）。
+    管线：格点映射吸附（v3.1 = 全局精修+rubato 分段跟踪）→ 同时性聚类 →
+    量化域守护 → 接缝合并 → 时值再分配 → 小节内单值分解（规则v1 §3.4）。
+    ql_map/resid_map 缺省时退回绝对 1/12 网格（调试用）。
     """
     _assign_track_voices(cls, notes)
+
+    def _default_map(t: float) -> Fraction:
+        return max(_snap(_ql(t, bpm), QL_DENOM), Fraction(0))
+
+    if ql_map is None:
+        ql_map = _default_map
+    if resid_map is None:
+        resid_map = lambda t: abs(_ql(t, bpm) - _default_map(t))  # noqa: E731
+
     events = []
     for n in notes:
-        onset_ql = _snap(_ql(n["onset"], bpm), QL_DENOM)
-        residual = abs(_ql(raw_onsets[id(n)], bpm) - onset_ql)
+        onset_ql = ql_map(n["onset"])
+        residual = resid_map(n["onset"])
         events.append({
             "pitch": int(n["pitch"]),
             "voice": int(n.get("voice", 1)),
@@ -442,15 +771,32 @@ def _m21_instrument(cls: str):
 
 
 def _transpose_semitones(cls: str) -> int:
-    """吉他/贝斯 = 移调乐器（记谱比实音高八度）。"""
-    return 12 if (cls in GUITAR_CLASSES or cls in BASS_CLASSES) else 0
+    """吉他 = 移调乐器（记谱比实音高八度，配 Treble8vb 谱表=标准吉他记谱）。
+    贝斯不移调、配低音谱表（2026-08-27 视觉缺陷清单：+12 移调 + 普通高音
+    谱表让贝斯音符挂 4-6 条下加线）。"""
+    return 12 if cls in GUITAR_CLASSES else 0
+
+
+def _clef_for(cls: str):
+    """单谱表轨的谱表选择：吉他族 Treble8vb（配 +12 记谱）；贝斯族低音
+    谱表；其余默认高音谱表。"""
+    if cls in GUITAR_CLASSES:
+        try:
+            return m21clef.Treble8vbClef()
+        except AttributeError:  # 老版本 music21 无别名
+            c = m21clef.TrebleClef()
+            return c
+    if cls in BASS_CLASSES:
+        return m21clef.BassClef()
+    return m21clef.TrebleClef()
 
 
 def _rest_pieces(gap: Fraction, vocab: list[Fraction] | None) -> list[Fraction]:
     """间隙 → 休止时值链。vocab=None（忠实）→ _legalize 细词表。
 
-    量化模式：词表去掉 1/12 后做最少片数 DP（5/12 应拆 1/4+1/6 而非
-    1/3+1/12——贪心会选后者）；仅 gap 本身就是 1/12 时兜底单片。
+    量化模式（时值 v2）：词表去掉 1/12 后做**最小代价** DP（单位分数 0
+    < 附点 1 < 三连音 2，同代价取片数少——如 9/12 休止优先 1/2+1/4 而非
+    附点 3/4 单片，"分子尽量是 1"）；仅 gap 本身就是 1/12 时兜底单片。
     """
     if vocab is None:
         return _legalize(gap)
@@ -469,18 +815,111 @@ def _rest_pieces(gap: Fraction, vocab: list[Fraction] | None) -> list[Fraction]:
         return out
     k = int(k)
     pieces = sorted((v for v in vocab if v != unit and v <= gap), reverse=True)
-    dp: list[list[int] | None] = [None] * (k + 1)
-    dp[0] = []
+    dp: list[tuple[int, int, list[Fraction]] | None] = [None] * (k + 1)
+    dp[0] = (0, 0, [])
     for i in range(1, k + 1):
         for p in pieces:
             u = int(p / unit)
             if u <= i and dp[i - u] is not None:
-                cand = [p] + dp[i - u]
-                if dp[i] is None or len(cand) < len(dp[i]):
+                c, n, lst = dp[i - u]
+                cand = (c + _dur_cost(p), n + 1, [p] + lst)
+                if dp[i] is None or cand[:2] < dp[i][:2]:
                     dp[i] = cand
     if dp[k] is not None:
-        return dp[k]
+        return dp[k][2]
     return [gap]  # 兜底（gap < 最小片）
+
+
+def _is_legal_single(d: Fraction) -> bool:
+    """d 能否作为单个音符/休止符记谱（type+附点+可选 3:2 三连音）。
+
+    MusicXML 里非合法单值（如 13/12、7/6 拍）music21 会导出成离奇连音
+    比例（13:12），MuseScore 无法解析 → 小节算术崩坏（2026-08-25 卡农
+    事件第二层根因）。这类值必须拆成 tie 链或改由休止符表达。
+    """
+    for base in (Fraction(1, 16), Fraction(1, 8), Fraction(1, 4),
+                 Fraction(1, 2), Fraction(1), Fraction(2), Fraction(4)):
+        for mult in (Fraction(1), Fraction(3, 2), Fraction(7, 4)):
+            for tm in (Fraction(1), Fraction(2, 3)):
+                if base * mult * tm == d:
+                    return True
+    return False
+
+
+_LEGAL_SINGLES = sorted({base * mult * tm
+                         for base in (Fraction(1, 16), Fraction(1, 8),
+                                      Fraction(1, 4), Fraction(1, 2),
+                                      Fraction(1), Fraction(2), Fraction(4))
+                         for mult in (Fraction(1), Fraction(3, 2),
+                                      Fraction(7, 4))
+                         for tm in (Fraction(1), Fraction(2, 3))})
+
+
+def _split_legal(d: Fraction) -> list[Fraction]:
+    """DP 精确拆成合法单值链（和恰为 d，片数最少）。
+
+    以 1/48 四分音符为单位做最少片数 DP；合法单值中所有 /48 整数值都
+    可作片段（含 1/12 兜底片），因此 /48 整数倍的 d 必有精确解。忠实
+    模式 /48 网格与量化模式 /12 网格都被覆盖。
+    """
+    unit = Fraction(1, 48)
+    k = d / unit
+    if k.denominator != 1 or k <= 0:
+        return [d]  # 非 /48 整数倍（理论不发生），交由调用方告警
+    pieces_u = sorted({int(p / unit) for p in _LEGAL_SINGLES
+                       if (p / unit).denominator == 1}, reverse=True)
+    n = int(k)
+    dp: list[list[int] | None] = [None] * (n + 1)
+    dp[0] = []
+    for i in range(1, n + 1):
+        for pu in pieces_u:
+            if pu <= i and dp[i - pu] is not None:
+                cand = [pu] + dp[i - pu]
+                if dp[i] is None or len(cand) < len(dp[i]):
+                    dp[i] = cand
+    if dp[n] is None:
+        return [d]
+    return [Fraction(pu, 48) for pu in dp[n]]
+
+
+def _legalize_placed(placed: list[dict]) -> list[dict]:
+    """兜底守护：placed 中出现非合法单值时值 → 拆 tie 链并告警。
+
+    正常路径不应触发（词表值全合法 + 吸收器已门控）；防的是未来改动
+    再引入复合值直接进 music21。Note/Chord/Rest 均支持 tie+duration，
+    统一按同音 tie 链拆分。
+    """
+    import copy
+
+    out: list[dict] = []
+    for it in placed:
+        d = it["dur"]
+        if _is_legal_single(d):
+            out.append(it)
+            continue
+        pieces = _split_legal(d)
+        if len(pieces) <= 1:
+            logger.warning("[notation] 非法时值 %s 无法精确拆分，原样保留", d)
+            out.append(it)
+            continue
+        t = it["obj"].tie.type if it["obj"].tie is not None else None
+        t_in = t in ("stop", "continue")
+        t_out = t in ("start", "continue")
+        off = it["offset"]
+        for i, p in enumerate(pieces):
+            obj = copy.deepcopy(it["obj"])
+            obj.duration.quarterLength = p
+            if i == 0:
+                role = "continue" if t_in else "start"
+            elif i == len(pieces) - 1:
+                role = "start" if t_out else "stop"
+            else:
+                role = "continue"
+            obj.tie = m21tie.Tie(role) if role else None
+            out.append({"offset": off, "dur": p, "obj": obj})
+            off += p
+        logger.warning("[notation] 非法时值 %s 拆为 %d 片 tie 链", d, len(pieces))
+    return out
 
 
 def _absorb_tiny_gaps(placed: list[dict],
@@ -488,8 +927,9 @@ def _absorb_tiny_gaps(placed: list[dict],
     """声部内孤立 1/12 间隙并进前音时值（~31ms@80bpm，视觉几乎不可见）。
 
     只延长前音/末音、绝不移动后续 onset——避免在连奏串中级联推移。
-    代价：前音时值可能变 5/12 类复合值（music21 拆成 tie 小尾巴，实测
-    全曲 ~16 个），比碎休止符温和得多。
+    仅当延长后的时值仍是合法单音值才吸收（否则留作 1/12 三连休止）：
+    盲目 +1/12 会造出 13/12 类复合值，music21 导出 13:12 连音比例，
+    MuseScore 直接小节算术崩坏（卡农事件教训）。
     """
     unit = Fraction(1, 12)
     placed.sort(key=lambda x: x["offset"])
@@ -497,14 +937,26 @@ def _absorb_tiny_gaps(placed: list[dict],
         placed[0]["offset"] = Fraction(0)
     for prev, nxt in zip(placed, placed[1:]):
         gap = nxt["offset"] - (prev["offset"] + prev["dur"])
-        if gap == unit:
+        if gap == unit and _is_legal_single(prev["dur"] + unit):
             prev["dur"] += unit
             prev["obj"].duration.quarterLength = prev["dur"]
     if placed:
         last = placed[-1]
-        if ql_per_measure - (last["offset"] + last["dur"]) == unit:
+        if (ql_per_measure - (last["offset"] + last["dur"]) == unit
+                and _is_legal_single(last["dur"] + unit)):
             last["dur"] += unit
             last["obj"].duration.quarterLength = last["dur"]
+
+
+def _legal_rest_chain(gap: Fraction, vocab: list[Fraction] | None) -> list[Fraction]:
+    """休止片段链，保证每片都是合法单值（非法片经 _split_legal 展开）。"""
+    out: list[Fraction] = []
+    for piece in _rest_pieces(gap, vocab):
+        if _is_legal_single(piece):
+            out.append(piece)
+        else:
+            out.extend(_split_legal(piece))
+    return out
 
 
 def _fill_rests(items: list[dict], ql_per_measure: Fraction,
@@ -512,13 +964,14 @@ def _fill_rests(items: list[dict], ql_per_measure: Fraction,
     """items = [{offset, dur, obj(NotRest)}] → 补休止符的 (offset, obj) 列表。
 
     量化模式 vocab=REST_VOCAB（干净词表）；忠实模式 None → _legalize 链。
+    所有休止片段保证为合法单值（非法值会让 MuseScore 小节算术崩坏）。
     """
     out = []
     cursor = Fraction(0)
     for it in sorted(items, key=lambda x: x["offset"]):
         if it["offset"] > cursor:
             off = cursor
-            for piece in _rest_pieces(it["offset"] - cursor, vocab):
+            for piece in _legal_rest_chain(it["offset"] - cursor, vocab):
                 r = m21note.Rest()
                 r.duration.quarterLength = piece
                 out.append((off, r))
@@ -527,7 +980,7 @@ def _fill_rests(items: list[dict], ql_per_measure: Fraction,
         cursor = it["offset"] + it["dur"]
     if cursor < ql_per_measure:
         off = cursor
-        for piece in _rest_pieces(ql_per_measure - cursor, vocab):
+        for piece in _legal_rest_chain(ql_per_measure - cursor, vocab):
             r = m21note.Rest()
             r.duration.quarterLength = piece
             out.append((off, r))
@@ -588,8 +1041,43 @@ def assemble_solo_score(cls: str, events: list[dict], bpm: float,
     else:
         part = stream.Part()
         part.insert(0, inst_obj)
+        part.insert(0, _clef_for(cls))  # 贝斯=低音谱表、吉他=Treble8vb（2026-08-27）
         part_of_voice = {v: part for v in voices_used}
         parts = [part]
+
+    def _split_lanes(items: list[dict]) -> list[dict]:
+        """溢出声部分配：同 offset+同时值叠入同 lane（成和弦）；同声部不同
+        音高时间重叠开新 lane——避免小节 overfull。"""
+        lanes: list[dict] = []
+        for it in sorted(items, key=lambda x: (x["offset"], -x["pitch"])):
+            for lane in lanes:
+                if (it["offset"] == lane["group_off"]
+                        and it["dur"] == lane["group_dur"]):
+                    lane["items"].append(it)
+                    break
+                if it["offset"] >= lane["end"]:
+                    lane["items"].append(it)
+                    lane["end"] = it["offset"] + it["dur"]
+                    lane["group_off"], lane["group_dur"] = it["offset"], it["dur"]
+                    break
+            else:
+                lanes.append({"items": [it], "end": it["offset"] + it["dur"],
+                              "group_off": it["offset"], "group_dur": it["dur"]})
+        return lanes
+
+    # 声部号基址：大谱表两个 PartStaff 合并导出为单个 MusicXML part 时，
+    # 声部号必须在 part 内全局唯一（MusicXML 语义）。两个谱表各自的溢出
+    # lane 若都从 1 编号，MuseScore 会把同号声部跨谱表合并 → 区间重叠被
+    # 推挤出小节 →「声部过长/不完整小节」刷屏（2026-08-25 卡农事件，
+    # eval/validate_musicxml.py 为回归门）。上谱表 1..n_top，下谱表接续。
+    voice_base: dict[int, int] = {}
+    if is_keyboard:
+        n_top = 1
+        for mi in range(m_lo, m_hi + 1):
+            items = [it for it in frag_items.get(1, []) if it["m"] == mi]
+            if items:
+                n_top = max(n_top, len(_split_lanes(items)))
+        voice_base[2] = n_top
 
     for v in voices_used:
         part = part_of_voice[v]
@@ -606,23 +1094,8 @@ def assemble_solo_score(cls: str, events: list[dict], bpm: float,
                 m.insert(0, r)
                 part.append(m)
                 continue
-            # 溢出声部分配：同 offset+同时值叠入同 lane（成和弦）；同声部
-            # 不同音高时间重叠开新 lane —— 避免小节 overfull
-            lanes: list[dict] = []
-            for it in sorted(items, key=lambda x: (x["offset"], -x["pitch"])):
-                for lane in lanes:
-                    if (it["offset"] == lane["group_off"]
-                            and it["dur"] == lane["group_dur"]):
-                        lane["items"].append(it)
-                        break
-                    if it["offset"] >= lane["end"]:
-                        lane["items"].append(it)
-                        lane["end"] = it["offset"] + it["dur"]
-                        lane["group_off"], lane["group_dur"] = it["offset"], it["dur"]
-                        break
-                else:
-                    lanes.append({"items": [it], "end": it["offset"] + it["dur"],
-                                  "group_off": it["offset"], "group_dur": it["dur"]})
+            # 溢出声部分配（lane 内同 offset+同时值成和弦）
+            lanes = _split_lanes(items)
             for li, lane in enumerate(lanes):
                 placed = []
                 for (grp_off, _grp_dur), grp in _group_chords(lane["items"]):
@@ -646,13 +1119,39 @@ def assemble_solo_score(cls: str, events: list[dict], bpm: float,
                             n.stemDirection = "down"
                         placed.append({"offset": grp_off, "dur": it["dur"], "obj": n})
                 voice = stream.Voice()
-                voice.id = li + 1
+                voice.id = voice_base.get(v, 0) + li + 1
+                placed = _legalize_placed(placed)
                 _absorb_tiny_gaps(placed, ql_per_measure)
                 for off, obj in _fill_rests(placed, ql_per_measure,
                                             REST_VOCAB if clean_rests else None):
                     voice.insert(off, obj)
                 m.insert(0, voice)
             part.append(m)
+
+    # 键盘族：只用单声部时（忠实模式恒 voice=1），另一谱表零小节会让
+    # makeNotation=False 导出直接拒绝——补全休止小节（MuseScore 默认还会
+    # 隐藏空谱表）。量化模式 voice_assign 双声部天然两表都有内容。
+    if is_keyboard:
+        for part in parts:
+            have = {m.number for m in part.getElementsByClass(stream.Measure)}
+            if have:
+                continue
+            for mi in range(m_lo, m_hi + 1):
+                m = stream.Measure()
+                m.number = mi - m_lo + 1
+                r = m21note.Rest()
+                r.duration.quarterLength = ql_per_measure
+                m.insert(0, r)
+                part.append(m)
+
+    # 谱号落首小节：Part 层 clef 在 makeNotation=False 导出中不物化
+    # （2026-08-27 canon 事故：钢琴双谱表全渲染成高音谱号，低音挂满加线）
+    if is_keyboard:
+        top.getElementsByClass(stream.Measure)[0].insert(0, m21clef.TrebleClef())
+        bottom.getElementsByClass(stream.Measure)[0].insert(0, m21clef.BassClef())
+    else:
+        parts[0].getElementsByClass(stream.Measure)[0].insert(
+            0, _clef_for(cls))
 
     # 首小节元数据
     m0 = parts[0].getElementsByClass(stream.Measure)[0]
@@ -688,6 +1187,15 @@ def assemble_solo_score(cls: str, events: list[dict], bpm: float,
                                  exc_info=True)
 
     score = stream.Score()
+    # 元数据：占位 "Music21 Fragment" 标题会被导出进 PDF/PNG（2026-08-27
+    # 视觉缺陷清单）——写乐曲名 + 轨道名 + 系统署名。
+    try:
+        from music21 import metadata as m21meta
+        score.insert(0, m21meta.Metadata(
+            title=f"{_SONG_TITLE or 'MUSE'} — {t_display_name(cls)}",
+            composer="MUSE 自动记谱"))
+    except Exception:
+        logger.debug("score metadata skipped", exc_info=True)
     if is_keyboard:
         score.insert(0, layout.StaffGroup(parts, symbol="brace"))
     for p in parts:
@@ -715,6 +1223,9 @@ def _tab_note_xml(m_el: ET.Element, dur: Fraction, pitch: int | None = None,
     if chord:
         ET.SubElement(note, "chord")
     if rest or pitch is None:
+        # TAB 谱行的休止符按制谱惯例隐藏（print-object 属性在 note 上；
+        # MuseScore 里漂浮在 TAB 行下方成排的休止符就是它，2026-08-27）
+        note.set("print-object", "no")
         ET.SubElement(note, "rest")
     else:
         note.append(_pitch_xml(pitch))
@@ -787,22 +1298,62 @@ def _build_tab_part_xml(events: list[dict], transposition: int,
         if not items:
             _tab_note_xml(m_el, dur=ql_per_measure, rest=True)
             continue
+        items.sort(key=lambda x: (x["offset"], -x["pitch"]))
+        # TAB 时值必须：合法单值 ∧ /48 整数（DIVISIONS=48）
+        tab_legal = [v for v in _LEGAL_SINGLES if (v * DIVISIONS).denominator == 1]
+
+        # 列聚类：所有声部的事件按时间摊平成"列"（≤1/12 内聚为一列，列内
+        # 为和弦——TAB 不分声部，重叠的持续音由 staff part 的 tie 表达）。
+        # 列宽 = max(成员时值)，且 clamp 到下一列 onset 与小节线——保证游程
+        # 永不越界（声部串行化曾把游程推爆，2026-08-25 TAB 修复）。
+        cols: list[list[dict]] = []
+        for it in items:
+            if cols and (it["offset"] - cols[-1][0]["offset"]) <= Fraction(1, 12):
+                cols[-1].append(it)
+            else:
+                cols.append([it])
 
         cursor = Fraction(0)
-        groups: dict[Fraction, list[dict]] = defaultdict(list)
-        for it in items:
-            groups[it["offset"]].append(it)
-        for off in sorted(groups):
+        for ci, col in enumerate(cols):
+            off = col[0]["offset"]
             if off > cursor:
-                _tab_note_xml(m_el, dur=off - cursor, rest=True)
-            for k, it in enumerate(sorted(groups[off], key=lambda x: -x["pitch"])):
-                _tab_note_xml(m_el, dur=it["dur"], pitch=it["pitch"],
-                              tie=it["tie"], chord=k > 0,
-                              string=it["string"], fret=it["fret"])
-            cursor = off + groups[off][0]["dur"]
+                for piece in _legal_rest_chain(off - cursor, REST_VOCAB):
+                    _tab_note_xml(m_el, dur=piece, rest=True)
+                cursor = off
+            room = ql_per_measure - off
+            if ci + 1 < len(cols):
+                room = min(room, cols[ci + 1][0]["offset"] - off)
+            dur = min(max(g["dur"] for g in col), room)
+            if dur not in tab_legal:
+                cands = [v for v in tab_legal if v <= dur]
+                dur = max(cands) if cands else Fraction(1, 12)
+            longest = max(col, key=lambda g: g["dur"])
+            for k, g in enumerate(sorted(col, key=lambda x: -x["pitch"])):
+                _tab_note_xml(m_el, dur=dur, pitch=g["pitch"],
+                              tie=longest["tie"] if k == 0 else g["tie"],
+                              chord=k > 0,
+                              string=g["string"], fret=g["fret"])
+            cursor = off + dur
         if cursor < ql_per_measure:
-            _tab_note_xml(m_el, dur=ql_per_measure - cursor, rest=True)
+            for piece in _legal_rest_chain(ql_per_measure - cursor, REST_VOCAB):
+                _tab_note_xml(m_el, dur=piece, rest=True)
     return part
+
+
+def _write_musicxml_exact(score, path: str) -> None:
+    """makeNotation=False 精确导出。
+
+    小节/声部/休止/时值已由本层自建完备；music21 默认导出会跑 makeNotation
+    重排（自动补休止、拆音符），曾把合法 tie 链改造成 13/12 类复合时值单音
+    → music21 写出离奇连音比例 → MuseScore 小节算术崩坏（2026-08-25 卡农
+    事件第三层根因）。内容均为 written pitch，故 atSoundingPitch=False。
+    """
+    from music21.musicxml import m21ToXml
+
+    score.atSoundingPitch = False
+    sx = m21ToXml.ScoreExporter(score, makeNotation=False)
+    root = sx.parse()
+    ET.ElementTree(root).write(path, encoding="UTF-8", xml_declaration=True)
 
 
 def _merge_tab_into_musicxml(xml_path: str, tab_part: ET.Element) -> None:
@@ -830,6 +1381,153 @@ def _admitted(t: dict, duration: float) -> bool:
     return len(notes) >= SCORE_MIN_NOTES and cov >= SCORE_MIN_COVERAGE
 
 
+def _duration_stats(out_tracks: list[dict]) -> dict:
+    """时值 v2/v3 验收统计：片段代价值分布 + 连音链率 + 休止符普查。
+
+    休止计数 = 声部内相邻事件"写值终点 → 下一音头"的正间隙个数（v3
+    削减前后对比口径；MusicXML 里的实体休止符与之同源）。
+    """
+    n_frag = {"unit": 0, "dotted": 0, "triplet": 0, "other": 0}
+    n_events = chained = n_rests = 0
+    for t in out_tracks:
+        by_voice: dict[int, list[tuple[float, float]]] = defaultdict(list)
+        for ev in t["events"]:
+            n_events += 1
+            if len(ev["frags"]) > 1:
+                chained += 1
+            for f in ev["frags"]:
+                c = _dur_cost(Fraction(f["dur"]))
+                n_frag["unit" if c == 0 else
+                        "dotted" if c == 1 else
+                        "triplet" if c == 2 else "other"] += 1
+            f0 = ev["frags"][0]
+            on = float(f0["bar"]) * 4 + float(f0["offset"])
+            end = on + sum(float(Fraction(f["dur"])) for f in ev["frags"])
+            by_voice[int(ev.get("voice", 1))].append((on, end))
+        for spans in by_voice.values():
+            spans.sort()
+            n_rests += sum(1 for (_, e0), (on1, _) in zip(spans, spans[1:])
+                           if on1 - e0 > 1e-9)
+    tot = sum(n_frag.values()) or 1
+    return {**{k: v for k, v in n_frag.items()},
+            "unit_pct": round(n_frag["unit"] / tot, 4),
+            "dotted_pct": round(n_frag["dotted"] / tot, 4),
+            "triplet_pct": round(n_frag["triplet"] / tot, 4),
+            "tie_chained_event_pct": round(chained / max(1, n_events), 4),
+            "n_events": n_events,
+            "n_phrase_rests": n_rests,
+            "phrase_rest_per_event": round(n_rests / max(1, n_events), 4)}
+
+
+def _export_score_mids(out_tracks: list[dict], bpm: float, output_dir: str,
+                       ql_per_measure: Fraction = Fraction(4)) -> list[str]:
+    """准入轨道 → notation/score_mid/{cls}.mid（Phase-1：播放与谱面同源）。
+
+    每事件一个持续 MIDI 音（连音链/小节切分只是记谱概念，听感上合并）；
+    onset/dur 取谱面量化值（bar·小节长+小节内偏移 → QL → 秒）。
+    稀疏轨道已在 build_notation 准入层统一剔除——mid/谱/播放三处同源。
+    """
+    try:
+        import pretty_midi
+        import src.ia_amt_frontend as _ia  # 其模块级 sys.path 注入使 taxonomy 可导入
+        from instrument_agnostic_amt.taxonomy.instrument_classes import (
+            INSTRUMENT_CLASSES, get_program_number_from_class_id)
+        from src.multi_instrument import CLASS_PROGRAM_OVERRIDES
+    except Exception:
+        logger.warning("[notation] pretty_midi/程序号映射不可用，score_mid 跳过",
+                       exc_info=True)
+        return []
+    out_dir = os.path.join(output_dir, "notation", "score_mid")
+    os.makedirs(out_dir, exist_ok=True)
+    written: list[str] = []
+    for t in out_tracks:
+        cls = t["instrument_class"]
+        if cls == "drums":
+            continue
+        class_id = (INSTRUMENT_CLASSES.index(cls)
+                    if cls in INSTRUMENT_CLASSES else None)
+        program = (0 if class_id is None else
+                   CLASS_PROGRAM_OVERRIDES.get(
+                       cls, int(get_program_number_from_class_id(class_id))))
+        pm = pretty_midi.PrettyMIDI(resolution=1920, initial_tempo=bpm)
+        pm.time_signature_changes.append(pretty_midi.TimeSignature(4, 4, 0.0))
+        inst = pretty_midi.Instrument(program=program, name=cls)
+        spql = 60.0 / bpm  # 秒/四分音符
+        # 同音高连排起音保护：填满写法使相邻同音高事件在 MIDI 里首尾相接
+        # 连成长音（听感=漏掉重复音头），起音前留 RELEASE_SEC 重新触发攻击
+        next_same_on: dict[int, float] = {}
+        by_vp: dict[tuple[int, int], list[tuple[float, int]]] = defaultdict(list)
+        for i, ev in enumerate(t["events"]):
+            by_vp[(int(ev.get("voice", 1)), int(ev["pitch"]))].append(
+                (float(ev.get("onset_sec", 0.0)), i))
+        for lst in by_vp.values():
+            lst.sort()
+            for (_, i), (on_next, _) in zip(lst, lst[1:]):
+                next_same_on[i] = on_next
+        for i, ev in enumerate(t["events"]):
+            frags = ev["frags"]
+            if not frags:
+                continue
+            # 音头 = 原始检测秒（rubato 曲目谱面是名义网格、播放对齐原曲
+            # 音频——两者解耦；时值 = 谱面名义片段和）
+            start = float(ev.get("onset_sec", 0.0))
+            dur_ql = sum(float(Fraction(f["dur"])) for f in frags)
+            end = start + dur_ql * spql
+            if i in next_same_on:
+                end = min(end, max(next_same_on[i] - RELEASE_SEC,
+                                   start + 0.023))
+            inst.notes.append(pretty_midi.Note(
+                velocity=max(1, min(127, int(ev.get("velocity", 100)))),
+                pitch=int(ev["pitch"]), start=start,
+                end=max(end, start + 0.023)))
+        pm.instruments.append(inst)
+        pm.write(os.path.join(out_dir, f"{cls}.mid"))
+        written.append(f"score_mid/{cls}.mid")
+        logger.info("  [notation] score_mid/%s.mid (%d events)", cls,
+                    len(t["events"]))
+    return written
+
+
+def _post_export_gate(xml_paths: list[str], loud: bool = True) -> dict:
+    """导出即校验（2026-08-25 建立）：所有 MusicXML 落盘后立刻跑
+    eval/validate_musicxml.py 的四项检查（跨度/重叠/跨谱表/合法时值）。
+
+    历史：两轮 MuseScore 报错（86→66→0）的教训是 music21 回读是假阴性
+    QA、人工抽查不可依赖——校验必须自动发生在每次导出后。有问题时
+    logger.error + 记入 notation.json，不静默出货。
+    """
+    summary = {"files": len(xml_paths), "problems": 0, "detail": {}}
+    try:
+        # 注意：不能 `from eval.validate_musicxml import ...`——eval/ 目录下的
+        # eval.py 同名模块会在 sys.path[0]=脚本目录时遮蔽 eval 包（实测踩坑），
+        # 按文件路径直接加载校验器，免疫任何打包/路径环境。
+        import importlib.util as _ilu
+        _vp = Path(__file__).resolve().parents[1] / "eval" / "validate_musicxml.py"
+        _spec = _ilu.spec_from_file_location("_muse_musicxml_validator", _vp)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        count_problems = _mod.count_problems
+    except Exception:
+        logger.warning("[notation] 校验器不可用，跳过导出后校验", exc_info=True)
+        return summary
+    for p in xml_paths:
+        if not os.path.exists(p):
+            continue
+        try:
+            n = count_problems(p)
+            summary["problems"] += n
+            summary["detail"][os.path.basename(p)] = n
+            if n and loud:
+                logger.error("[notation] 导出校验失败 %s: %d 处问题，"
+                             "跑 eval/validate_musicxml.py %s 看明细",
+                             os.path.basename(p), n, p)
+        except Exception:
+            logger.warning("[notation] 校验 %s 异常", p, exc_info=True)
+    if summary["problems"] == 0:
+        logger.info("[notation] 导出校验通过：%d 个文件 0 问题", len(xml_paths))
+    return summary
+
+
 def build_notation(notes_json: dict, output_dir: str, mode: str = "both") -> dict | None:
     """notes_json（multi_instrument 产物）→ notation/ 目录。
 
@@ -852,7 +1550,58 @@ def build_notation(notes_json: dict, output_dir: str, mode: str = "both") -> dic
     pooled = [n for t in tracks for n in t["notes"]]
     raw_onsets = {id(n): float(n["onset"]) for n in pooled}
 
-    quantize_onsets(pooled, bpm, tsig)  # 全局池化，in-place
+    # 音头映射（时值 v3.2）：双候选择优——①音频拍同步映射（rubato 解，
+    # beat_times 来自 src/beat_track.py，multi_instrument 注入 notes_json）
+    # ②onset 格点拟合映射（全局精修+分段跟踪）。按"半拍网格浓度"选：
+    # 连续 QL 到最近半拍的平均距离（真实音乐的 onset 集中在拍/半拍上，
+    # 映射错旋则趋于均匀 0.125；canon 实测纯 onset 拟合在 rubato 抹花下
+    # 无浓度可言，音频提拍 std 16ms 扛得住）。
+    bpm_detected = bpm
+    lattice = _fit_grid_map(pooled, bpm)
+    cands = []
+    beat_times = notes_json.get("beat_times") or []
+    if len(beat_times) >= 16 and notes_json.get("pulse_sec"):
+        bt = _beat_sync_map(pooled, beat_times,
+                            float(notes_json["pulse_sec"]), bpm)
+        if bt:
+            cands.append(("beat-sync", bt))
+    cands.append(("piecewise-lattice", lattice))
+
+    def _halfbeat_score(rec) -> float:
+        ds = []
+        for n in pooled:
+            x = abs(float(rec["cont"](raw_onsets[id(n)])) % 0.5)
+            ds.append(min(x, 0.5 - x))
+        ds.sort()
+        return ds[len(ds) // 2]  # 中位（抗离群）
+
+    for name, rec in cands:
+        rec["score"] = _halfbeat_score(rec)
+        rec["kind"] = name
+    map_kind, rec = min(cands, key=lambda r: r[1]["score"])
+    ql_map, resid_map, qmeta = rec["ql_map"], rec["resid_map"], rec["meta"]
+    logger.info("  [notation] grid map: %s (半拍中位距 %.3f QL；候选 %s)",
+                map_kind, rec["score"],
+                ", ".join(f"{n}={r['score']:.3f}" for n, r in cands))
+
+    # bpm 精修仅在格点拟合获胜时采纳（拍同步映射的速度语义由 pulse_ql
+    # 承载；rubato 曲目的格点精修易踩混叠假峰）
+    bpm_ref = lattice["meta"].get("bpm_refined", bpm)
+    if map_kind == "piecewise-lattice" and abs(bpm_ref - bpm) > 0.05:
+        logger.info("  [notation] tempo refine: %.2f → %.2f (%+.2f%%)",
+                    bpm, bpm_ref, lattice["meta"]["tempo_delta_pct"])
+        bpm = bpm_ref
+        notes_json["bpm"] = round(bpm_ref, 2)  # notes.json 已落盘 → 回写
+        try:
+            _np = os.path.join(output_dir, "notes.json")
+            with open(_np, "r", encoding="utf-8") as f:
+                _disk = json.load(f)
+            if _disk.get("bpm") != notes_json["bpm"]:
+                _disk["bpm"] = notes_json["bpm"]
+                with open(_np, "w", encoding="utf-8") as f:
+                    json.dump(_disk, f, ensure_ascii=False, indent=2)
+        except Exception:
+            logger.warning("  [notation] notes.json bpm 回写失败", exc_info=True)
     key_sig = estimate_key(pooled)
 
     # T1 和声先验层：和弦跟踪（失败不影响谱面导出）
@@ -864,14 +1613,28 @@ def build_notation(notes_json: dict, output_dir: str, mode: str = "both") -> dic
     except Exception:
         logger.exception("  [harmony] chord tracking failed")
 
-    # 量化健康度：网格命中率（bpm 反向校验的廉价代理，规则v1 §4）
-    hits = sum(1 for n in pooled
-               if abs(_ql(raw_onsets[id(n)], bpm)
-                      - _snap(_ql(raw_onsets[id(n)], bpm), QL_DENOM)) <= SNAP_TOL_QL)
-    snap_rate = hits / len(pooled)
-    logger.info("  [notation] grid snap rate %.1f%% (bpm=%.1f)", snap_rate * 100, bpm)
-    if snap_rate < 0.4:
-        logger.warning("  [notation] snap rate < 40%% — bpm=%s 可能失准", bpm)
+    # 量化健康度：音头漂移统计（吸附位移）+ 半拍浓度（结构代理）。
+    # 旧 snap_rate 对 1/12 稠密网格恒为 1（吸附距离 ≤ 半格 34ms 是格点
+    # 密度性质、与对不对齐无关——已废弃为空指标，2026-08-27 canon 事故）。
+    drift_ms: list[float] = []
+    for n in pooled:
+        d = resid_map(raw_onsets[id(n)])
+        # resid 单位 = 1/12 格（twelfth），换算 QL 需 /12（曾漏除 12 导致
+        # v3.1 起漂移虚报 12 倍：canon "185ms" 实为 15.4ms）
+        drift_ms.append(float(d) / 12 * 60.0 / bpm * 1000)
+    drift_ms.sort()
+    onset_drift = {
+        "median_ms": round(drift_ms[len(drift_ms) // 2], 1),
+        "p90_ms": round(drift_ms[min(len(drift_ms) - 1,
+                                     int(len(drift_ms) * 0.9))], 1),
+        "max_ms": round(drift_ms[-1], 1),
+    }
+    halfbeat_med = round(rec["score"], 4)
+    logger.info("  [notation] onset_drift=%s halfbeat_med=%.3f QL (bpm=%.2f)",
+                onset_drift, rec["score"], bpm)
+    if halfbeat_med > 0.15:
+        logger.warning("  [notation] 半拍浓度弱（%.3f）——拍/速度可能失准",
+                       halfbeat_med)
 
     out_tracks = []
     os.makedirs(os.path.join(output_dir, "notation", "solo"), exist_ok=True)
@@ -881,7 +1644,8 @@ def build_notation(notes_json: dict, output_dir: str, mode: str = "both") -> dic
         if cls == "drums":
             logger.info("  [notation] drums 谱 v1 不含，跳过")
             continue
-        events = build_track_events(cls, t["notes"], raw_onsets, bpm)
+        events = build_track_events(cls, t["notes"], raw_onsets, bpm,
+                                     ql_map, resid_map)
         if harmony_segments:
             try:
                 from src.harmony_prior import note_role
@@ -921,16 +1685,30 @@ def build_notation(notes_json: dict, output_dir: str, mode: str = "both") -> dic
         "key": key_sig,
         "harmony_track": harmony_segments or [],
         "analysis": analysis,
-        "meta": {"snap_rate": round(snap_rate, 4),
-                 "quantizer": "segmented-16th+triplet"},
+        "meta": {"quantizer": map_kind,
+                 "halfbeat_med_ql": halfbeat_med,
+                 "bpm_detected": round(bpm_detected, 2),
+                 "bpm_refined": lattice["meta"].get("bpm_refined",
+                                                    round(bpm, 2)),
+                 "tempo_delta_pct": lattice["meta"].get("tempo_delta_pct",
+                                                       0.0),
+                 **{k: v for k, v in qmeta.items()
+                    if k not in ("bpm_refined", "tempo_delta_pct")},
+                 "onset_drift_ms": onset_drift},
+        "duration_stats": _duration_stats(out_tracks),
         "tracks": out_tracks,
     }
+    score_mids = _export_score_mids(out_tracks, bpm, output_dir, ql_per_measure)
+    if score_mids:
+        notation["score_mids"] = score_mids
     with open(os.path.join(output_dir, "notation", "notation.json"), "w",
               encoding="utf-8") as f:
         json.dump(notation, f, ensure_ascii=False, indent=1)
-    logger.info("  [notation] notation.json written (%d tracks)", len(out_tracks))
+    logger.info("  [notation] notation.json written (%d tracks, dur_stats=%s)",
+                len(out_tracks), notation["duration_stats"])
 
     # 单乐器谱导出（量化模式）
+    exported: list[str] = []
     for t in out_tracks:
         cls = t["instrument_class"]
         transposition = _transpose_semitones(cls)
@@ -939,7 +1717,7 @@ def build_notation(notes_json: dict, output_dir: str, mode: str = "both") -> dic
             score = assemble_solo_score(cls, t["events"], bpm, notation["key"],
                                         transposition, ql_per_measure, tsig,
                                         harmony_segments)
-            score.write("musicxml", fp=stem + ".musicxml")
+            _write_musicxml_exact(score, stem + ".musicxml")
             if cls in GUITAR_CLASSES:
                 tab = _build_tab_part_xml(t["events"], transposition,
                                           ql_per_measure, tsig,
@@ -948,21 +1726,36 @@ def build_notation(notes_json: dict, output_dir: str, mode: str = "both") -> dic
             n_meas = len(list(score.recurse().getElementsByClass(stream.Measure)))
             logger.info("  [notation] solo/%s.musicxml (%d events, %d measures)",
                         cls, len(t["events"]), n_meas)
+            exported.append(stem + ".musicxml")
         except Exception:
             logger.exception("  [notation] solo export failed: %s", cls)
 
     if mode in ("faithful", "both"):
-        _export_faithful(tracks, raw_onsets, bpm, ql_per_measure, notation,
-                         output_dir, tsig)
+        exported += _export_faithful(tracks, raw_onsets, bpm, ql_per_measure,
+                                     notation, output_dir, tsig) or []
+
+    # 导出即校验（量化谱必须 0 问题；忠实模式 1/48 精度按设计会告警，单独口径）
+    if exported:
+        quantized_files = [p for p in exported if "faithful" not in p]
+        faithful_files = [p for p in exported if "faithful" in p]
+        notation["validation"] = {
+            "quantized": _post_export_gate(quantized_files),
+            **({"faithful_by_design": _post_export_gate(faithful_files, loud=False)}
+               if faithful_files else {}),
+        }
+        with open(os.path.join(output_dir, "notation", "notation.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(notation, f, ensure_ascii=False, indent=1)
     return notation
 
 
 def _export_faithful(tracks: list[dict], raw_onsets: dict[int, float], bpm: float,
                      ql_per_measure: Fraction, notation: dict, output_dir: str,
-                     time_signature: str = "4/4") -> None:
+                     time_signature: str = "4/4") -> list[str]:
     """忠实模式：不做分段网格量化，位置/时值取原始值（1/48 网格表达），
     时值经 _legalize 分解为合法 tie 链——谱面会出现非标准时值与碎休止，
-    这正是忠实模式的语义。单声部（不做人声部分Split）。"""
+    这正是忠实模式的语义。单声部（不做人声部分Split）。返回导出路径。"""
+    exported: list[str] = []
     for t in tracks:
         cls = t["instrument_class"]
         if cls == "drums":
@@ -997,8 +1790,11 @@ def _export_faithful(tracks: list[dict], raw_onsets: dict[int, float], bpm: floa
             score = assemble_solo_score(cls, events, bpm, notation["key"],
                                         _transpose_semitones(cls), ql_per_measure,
                                         time_signature, clean_rests=False)
-            score.write("musicxml", fp=os.path.join(
+            _write_musicxml_exact(score, os.path.join(
                 output_dir, "notation", "solo", f"{cls}.faithful.musicxml"))
             logger.info("  [notation] solo/%s.faithful.musicxml", cls)
+            exported.append(os.path.join(
+                output_dir, "notation", "solo", f"{cls}.faithful.musicxml"))
         except Exception:
             logger.exception("  [notation] faithful export failed: %s", cls)
+    return exported
