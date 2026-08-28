@@ -125,4 +125,6 @@ progress.md findings.md  开发日志与实验结论（持续更新）
 
 ## 许可证
 
-待定（团队讨论中）。第三方模型的权重与代码遵循其各自原始许可。
+本项目代码采用 [MIT License](LICENSE)。
+
+注意：本项目调用或参考的第三方模型与代码（Demucs、MelBand-RoFormer、ia-amt、SOME、basic-pitch、OSMD 等）遵循其各自原始许可，不在本项目的 MIT 授权范围内。
