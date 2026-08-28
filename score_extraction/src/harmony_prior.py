@@ -253,15 +253,72 @@ def note_role(pitch: int, ql: Fraction, segments: list[dict],
 
 
 # ---------------------------------------------------------------------------
-# T4 v0：AI 乐曲打分（用户创意点 2026-08-23；吃和弦轨+离群率，idea_backlog K）
+# T4 v0：AI 乐谱分析（用户创意点 2026-08-23；吃和弦轨+离群率，idea_backlog K）
+# 匹配器 v1（用户规范 2026-08-28）：度数串 + 连续重复折叠（"1155663344114455"
+# 与四连复用自动归一）+ 旋转起点（卡农环任意相位进入都算）+ 大小性质容差 1
+# （吸收属七代换 II7 代 ii / III7 代 iii、小 iv 借用；sus4 两可=通配）。
+# 文献：de Haas et al. ISMIR 2008（TPSD，五度圈进行相似度）——进行检测的
+# 容差空间=调性距离，此处取其轻量子集（度数精确+性质容差）。
 # ---------------------------------------------------------------------------
 
-ROYAL_ROAD = [(5, "M"), (7, "M"), (4, "m"), (9, "m")]      # 王道進行 IV-V-iii-vi
-CANON = [(0, "M"), (7, "M"), (9, "m"), (4, "m"), (5, "M")]  # 卡农 I-V-vi-iii-IV
-JUST_TWO = [(0, "M"), (9, "m"), (4, "m"), (5, "M")]  # I-vi-iii-IV（645 系逆循环）
+# 度数串（1-based 大调音级）：王道 4536；卡农经典 15634145；卡农变奏（vi 收
+# 束）1563461；645 系 1645。7 级按小性质（自然 dim 容差由容错位吸收）。
+_PROG_PARITY = {1: "M", 2: "m", 3: "m", 4: "M", 5: "M", 6: "m", 7: "m"}
+_PROG_SEMIS = {1: 0, 2: 2, 3: 4, 4: 5, 5: 7, 6: 9, 7: 11}
+
+
+def _pattern_variants(digits: str) -> list[list[tuple[int, str]]]:
+    """度数串 → (半音度数, 期望性质) 模板的全部旋转。"""
+    base = [(_PROG_SEMIS[int(c)], _PROG_PARITY[int(c)]) for c in digits]
+    n = len(base)
+    return [[base[(i + j) % n] for j in range(n)] for i in range(n)]
+
+
+ROYAL_ROAD_DIGITS = "4536"
+CANON_DIGITS = "15634145"
+CANON_VARIANT_DIGITS = "1563461"
+JUST_TWO_DIGITS = "1645"
 _MAJORISH = {"", "7", "maj7", "sus4"}  # 大性质族（m/m7 为小性质族）
 DIATONIC_DEGREES = {0, 2, 4, 5, 7, 9, 11}
 SEVENTH_FAMILIES = {"7", "maj7", "m7"}
+
+
+def _parity_of_quality(q: str) -> str | None:
+    """性质 → 大/小族；sus4 两可。"""
+    if q == "sus4":
+        return None
+    return "M" if q in _MAJORISH else "m"
+
+
+def _count_progression_v1(pairs: list[tuple[int, str | None]],
+                          digits: str, max_parity_miss: int = 1) -> int:
+    """RLE 度数序列上数模板旋转命中（度数精确 + 性质容差 max_parity_miss）。
+
+    输入先折叠连续同度数（"11 55 66…"复用形式归一到模板长度再比）。
+    """
+    rle: list[tuple[int, str | None]] = []
+    for deg, par in pairs:
+        if rle and rle[-1][0] == deg:
+            continue
+        rle.append((deg, par))
+    n = 0
+    for pat in _pattern_variants(digits):
+        L = len(pat)
+        for i in range(len(rle) - L + 1):
+            miss = 0
+            for (deg, par), (pdeg, ppar) in zip(rle[i:i + L], pat):
+                if deg != pdeg:
+                    miss = max_parity_miss + 1
+                    break
+                if par is None or ppar is None:
+                    continue  # sus4 通配
+                if par != ppar:
+                    miss += 1
+                    if miss > max_parity_miss:
+                        break
+            if miss <= max_parity_miss:
+                n += 1
+    return n
 
 
 def _degree_seq(segments: list[dict], key_str: str) -> list[tuple[int, str]]:
@@ -278,27 +335,12 @@ def _degree_seq(segments: list[dict], key_str: str) -> list[tuple[int, str]]:
     return seq
 
 
-def _count_progression(seq: list[tuple[int, str]], prog: list[tuple[int, str]]) -> int:
-    """滑动窗计数（度数精确 + 大小性质容差；sus4 两可=通配）。"""
-    def parity(q: str) -> str | None:
-        if q == "sus4":
-            return None
-        return "M" if q in _MAJORISH else "m"
-
-    n = 0
-    for i in range(len(seq) - len(prog) + 1):
-        window = seq[i:i + len(prog)]
-        if all(d == pd and (parity(q) is None or parity(q) == pq)
-               for (d, q), (pd, pq) in zip(window, prog)):
-            n += 1
-    return n
-
-
 def score_analysis(segments: list[dict], key_str: str,
                    outlier_rate: float | None = None) -> dict:
-    """乐曲分析 v0：王道/卡农检出、语料常见度、独创度、和声复杂度。"""
+    """乐曲分析 v1：王道/卡农（含变奏）检出、语料常见度、独创度、和声复杂度。"""
     corpus = _load_corpus()
     seq = _degree_seq(segments, key_str)
+    pairs = [(deg, _parity_of_quality(q)) for deg, q in seq]
     n = len(seq)
     common = 0
     if corpus and n >= 2:
@@ -311,20 +353,24 @@ def score_analysis(segments: list[dict], key_str: str,
     commonality = round(common / (n - 1), 3) if n >= 2 else 0.0
     sevenths = sum(1 for _, q in seq if q in SEVENTH_FAMILIES)
     borrowed = sum(1 for d, _ in seq if d not in DIATONIC_DEGREES)
-    rr = _count_progression(seq, ROYAL_ROAD)
-    ca = _count_progression(seq, CANON)
-    jt = _count_progression(seq, JUST_TWO)
+    rr = _count_progression_v1(pairs, ROYAL_ROAD_DIGITS)
+    ca = _count_progression_v1(pairs, CANON_DIGITS)
+    cv = _count_progression_v1(pairs, CANON_VARIANT_DIGITS)
+    jt = _count_progression_v1(pairs, JUST_TWO_DIGITS)
+    canon_total = ca + cv
     return {
         "chords": n,
         "royal_road_hits": rr,
-        "canon_hits": ca,
+        "canon_hits": canon_total,
+        "canon_classic_hits": ca,
+        "canon_variant_hits": cv,
         "just_two_hits": jt,
         "commonality": commonality,            # 语料常见进行覆盖率
         "originality": round(1.0 - commonality, 3),
         "seventh_fraction": round(sevenths / n, 3) if n else 0.0,
         "borrowed_fraction": round(borrowed / n, 3) if n else 0.0,
         "outlier_note_rate": round(outlier_rate, 4) if outlier_rate is not None else None,
-        "summary": (f"王道×{rr} · 卡农×{ca} · 645系×{jt} · "
+        "summary": (f"王道×{rr} · 卡农×{canon_total} · 645系×{jt} · "
                     f"语料常见 {commonality:.0%} · 独创 {1.0 - commonality:.0%}"
                     + (f" · {n} 和弦/七和弦 {sevenths / n:.0%}" if n else "")),
     }

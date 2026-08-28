@@ -38,6 +38,15 @@ export class AudioEngine {
     return this.buffer.duration;
   }
 
+  /** 换曲卸载（解码失败降级用）：停声并清 buffer——否则 duration 还报
+   * 旧曲的长度（decodeAudioData 抛异常时 this.buffer 保持旧值） */
+  unload(): void {
+    this.stopSource();
+    this.playing = false;
+    this.offsetAt = 0;
+    this.buffer = null;
+  }
+
   get duration(): number {
     return this.buffer?.duration ?? 0;
   }

@@ -59,10 +59,23 @@ export interface NotationMeta {
 }
 
 export type ViewMode = "roll" | "score";
-export type ScoreMode = "quantized" | "faithful";
+
+/** 卷帘音源：谱面派生 MIDI（记谱后）| 转写原始 MIDI（处理前对照） */
+export type MidiSource = "score" | "raw";
+
+/** 一键管线进度（本地桥轮询；stage: upload/bpm/separate/transcribe/notation/done/error） */
+export interface PipelineProgress {
+  stage: string;
+  pct: number;
+  label: string;
+  elapsed: number; // 秒
+}
 
 /** 演示曲库条目（public/demo v2 清单） */
 export interface DemoSong {
   id: string; // 子目录名（稳定 key）
   name: string; // 显示名（音频文件名 stem）
+  dir: string; // demo 根下的子目录
+  mids: string[]; // 记谱后（score_mid）清单
+  rawMids: string[]; // 处理前（转写原始）清单，空 = 无对照
 }

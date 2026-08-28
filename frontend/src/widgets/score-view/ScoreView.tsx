@@ -16,8 +16,28 @@ import { cn } from "@/shared/utils/cn";
  */
 export function ScoreView() {
   const project = usePlayerStore((s) => s.project);
+  const midiSource = usePlayerStore((s) => s.midiSource);
   const notation = project?.notation;
   if (!notation || notation.tracks.length === 0) return <EmptyScore />;
+  if (midiSource === "raw") {
+    // 处理前（转写原始）= 听感对照专用，原始 1/48 网格时值出谱不可读
+    return (
+      <div className="flex h-full items-center justify-center p-8">
+        <div className="flex max-w-md flex-col items-center gap-4 rounded-2xl border border-stroke bg-surface-1/60 px-10 py-10 text-center backdrop-blur-xl">
+          <div className="flex h-16 w-16 items-center justify-center rounded-full bg-accent/15">
+            <FileMusic className="h-8 w-8 text-accent" />
+          </div>
+          <h2 className="text-lg font-medium text-content-1">
+            处理前模式不提供乐谱
+          </h2>
+          <p className="text-sm leading-relaxed text-content-2">
+            当前卷帘播放的是转写原始 MIDI（处理前对照）。<br />
+            切回「记谱后」即可查看量化乐谱与移动光标。
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full flex-col">
@@ -232,19 +252,23 @@ function ScoreCanvas({ notation }: { notation: NotationMeta }) {
             for (const se of gm.staffEntries ?? []) {
               const ts = se.getAbsoluteTimestamp?.();
               if (!ts) continue;
+              // OSMD 时间戳单位=全音符（MusicXML n/(4·divisions) 约定），
+              // timeMap/QL 是四分音符单位 → ×4 换算（08-28 用户报"歌放到
+              // 1/4 光标就到谱尾"= 4× 速率错位的根因）
               entries.push({
-                ql: Number(ts.RealValue ?? 0),
+                ql: Number(ts.RealValue ?? 0) * 4,
                 x: se.PositionAndShape.absolutePosition.x,
               });
             }
           }
           if (!isFinite(x)) continue;
           const ts = inst.Sheet?.SourceMeasures?.[i]?.AbsoluteTimestamp;
-          const qlScore = ts
+          // 谱内时间统一 whole 单位（4/4 一小节 = 1），fallback i 即第 i 小节
+          const qlWholes = ts
             ? Number(ts.RealValue ?? (ts.n ?? 0) / (ts.d ?? 1))
-            : i * 4;
-          // 小节时间戳是渲染谱相对值；timeMap 的 QL 是全曲绝对值
-          rows.push({ ql: qlScore + trackMeta.minBar * 4, x, w, yTop, yBot });
+            : i;
+          // 小节时间戳是渲染谱相对值；timeMap 的 QL 是全曲绝对值（quarter）
+          rows.push({ ql: qlWholes * 4 + trackMeta.minBar * 4, x, w, yTop, yBot });
           for (const e of entries) {
             anchors.push({
               ql: e.ql + trackMeta.minBar * 4,

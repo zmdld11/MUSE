@@ -842,10 +842,17 @@ def _is_legal_single(d: Fraction) -> bool:
     MusicXML 里非合法单值（如 13/12、7/6 拍）music21 会导出成离奇连音
     比例（13:12），MuseScore 无法解析 → 小节算术崩坏（2026-08-25 卡农
     事件第二层根因）。这类值必须拆成 tie 链或改由休止符表达。
+
+    注意 mult 不含 7/4（双附点）：双附点×三连音（7/12、7/24…）虽然
+    理论可记（DUR_TO_TYPE 有正确映射），但 music21 会把它们导出成
+    time-modification 12:7 → OSMD/MuseScore 渲染成荒谬连音比例
+    （2026-08-28 用户"14/23 连音"事件；demo 里 14 处 12:7 全来自
+    _absorb_tiny_gaps 把 1/2+1/12 并成 7/12）。纯双附点值词表不产、
+    拆链兜底即可。
     """
     for base in (Fraction(1, 16), Fraction(1, 8), Fraction(1, 4),
                  Fraction(1, 2), Fraction(1), Fraction(2), Fraction(4)):
-        for mult in (Fraction(1), Fraction(3, 2), Fraction(7, 4)):
+        for mult in (Fraction(1), Fraction(3, 2)):
             for tm in (Fraction(1), Fraction(2, 3)):
                 if base * mult * tm == d:
                     return True
@@ -856,8 +863,7 @@ _LEGAL_SINGLES = sorted({base * mult * tm
                          for base in (Fraction(1, 16), Fraction(1, 8),
                                       Fraction(1, 4), Fraction(1, 2),
                                       Fraction(1), Fraction(2), Fraction(4))
-                         for mult in (Fraction(1), Fraction(3, 2),
-                                      Fraction(7, 4))
+                         for mult in (Fraction(1), Fraction(3, 2))
                          for tm in (Fraction(1), Fraction(2, 3))})
 
 

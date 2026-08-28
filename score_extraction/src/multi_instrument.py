@@ -160,7 +160,10 @@ def _separated_stem_specs(audio_path: str, output_dir: str) -> list[tuple[str, s
     return kept
 
 
-def run_multi_instrument(audio_path: str, output_dir: str, bpm: float) -> bool:
+def run_multi_instrument(audio_path: str, output_dir: str, bpm: float,
+                         on_stage=None) -> bool:
+    """on_stage(stage, label)：管线桥进度钩子（stage ∈ separate/transcribe/
+    notation），CLI 直跑时不传、行为不变。"""
     from src.ia_amt_frontend import transcribe_ia_amt
     from instrument_agnostic_amt.taxonomy.instrument_classes import (
         INSTRUMENT_CLASSES,
@@ -182,6 +185,8 @@ def run_multi_instrument(audio_path: str, output_dir: str, bpm: float) -> bool:
     # versep_guitar = 混合（默认）：吉他走 VER-SEP stem（F2 证据 AUPRC 0.250→
     #   0.525 + 2.0 后下游 0.597），其余类混音直通（BS A/B：demucs stemwise 掉精度）
     separated = config.MULTI_SEPARATION != "off"
+    if on_stage:
+        on_stage("separate", "乐器分离" if separated else "混音直通")
     if config.MULTI_SEPARATION == "versep_guitar":
         from src.versep_sep import separate_guitar
         sep_dir = os.path.join(output_dir, "sep")
@@ -201,7 +206,9 @@ def run_multi_instrument(audio_path: str, output_dir: str, bpm: float) -> bool:
         runs = [("<raw>", audio_path, set())]
 
     groups: dict[str, list[dict]] = {}
-    for label, wav, gate in runs:
+    for ri, (label, wav, gate) in enumerate(runs):
+        if on_stage:
+            on_stage("transcribe", f"多乐器转写 {ri + 1}/{len(runs)}")
         logger.info(f"  [multi] Layer 2: ia-amt default frontend @ {label}...")
         frontend = transcribe_ia_amt(wav, model_type="default",
                                      note_bias=config.IA_NOTE_BIAS)
@@ -215,6 +222,51 @@ def run_multi_instrument(audio_path: str, output_dir: str, bpm: float) -> bool:
     if not groups:
         logger.warning("  [multi] no notes from default model")
         return False
+    # 人声支线骨架（pre 版，2026-08-28 X）：MelBand 分离 + SOME 音符化替代
+    # raw 直推的 melody/choir/harmony 类。必须在 ia-amt run 之后执行——两仓
+    # 库都有顶层 infer.py，SOME 先加载会劫持 ia-amt 的 infer 解析（08-28 VII
+    # 实测）。失败回退旧路径（raw 混音直推的人声类保留）。颤音/碎音算法
+    # 修正 = 下版本已知项（本层不动 SOME 原始输出）。
+    vocal_notes: list[dict] | None = None
+    vocal_backbone = ""
+    if config.MULTI_SEPARATION == "versep_guitar":
+        from src.source_separate import separate_vocals_melband
+        if on_stage:
+            on_stage("separate", "人声分离")
+        vocals_wav = separate_vocals_melband(
+            audio_path, os.path.join(output_dir, "sep", "melband"))
+        if vocals_wav:
+            # 器乐曲护栏：MelBand 对无人声曲会有伴奏漏音（gymnopedie 钢琴
+            # 漏音 mean_amp 0.007 vs 人声曲 0.09+，实测 2026-08-28 X）——
+            # stem 幅度过低视为无人声，回退 raw 直推（由 ia-amt 自然不出
+            # melody 类）。SOME 在近空 stem 上也会吐零星碎音，不能只靠它。
+            amp = _stem_mean_amp(vocals_wav)
+            if amp < 0.02:
+                logger.info("  [multi] 人声 stem 幅度 %.4f < 0.02（器乐/近空），"
+                            "人声回退 raw 直推", amp)
+                vocals_wav = None
+        if vocals_wav:
+            from src.some_frontend import transcribe_some
+            if on_stage:
+                on_stage("transcribe", "人声转写")
+            try:
+                r = transcribe_some(vocals_wav)
+                if r["note_count"] >= MIN_CLASS_NOTES:
+                    vocal_notes = r["notes"]
+                    vocal_backbone = "melband+some"
+            except Exception:
+                logger.warning("  [multi] SOME 人声转写失败，回退 raw 直推",
+                               exc_info=True)
+        else:
+            logger.warning("  [multi] MelBand 分离未产出，人声回退 raw 直推")
+    if vocal_notes is not None:
+        # 人声类由 SOME 支线承担，raw 直推的人声类丢弃（防双计）
+        dropped = {c: len(groups.pop(c)) for c in list(groups)
+                   if c in VOICE_CLASSES}
+        if dropped:
+            logger.info("  [multi] 人声类改走 SOME 支线，raw 直推人声丢弃: %s",
+                        dropped)
+        groups["melody"] = vocal_notes
     groups = {k: v for k, v in groups.items() if len(v) >= MIN_CLASS_NOTES}
 
     # 记谱规则v1 §3 时值清洗 + §2 准入统计
@@ -297,6 +349,7 @@ def run_multi_instrument(audio_path: str, output_dir: str, bpm: float) -> bool:
                    "separated": separated,
                    **({"separators": {
                           "guitar": "VERSEP2.0+bs4",
+                          "vocals": vocal_backbone or "raw-direct",
                           "others": "htdemucs_6s" if config.MULTI_SEPARATION == "versep_demucs" else "raw-direct"},
                        "mode": config.MULTI_SEPARATION,
                        "stem_gating": True} if separated else {})},
@@ -309,6 +362,8 @@ def run_multi_instrument(audio_path: str, output_dir: str, bpm: float) -> bool:
     # 记谱层（阶段19）：NotationScore + 单乐器谱（量化+忠实双模式）
     try:
         from src.notation_layer import build_notation
+        if on_stage:
+            on_stage("notation", "记谱与谱面导出")
         build_notation(notes_json, output_dir, mode=config.NOTATION_MODE)
     except Exception:
         logger.exception("  [multi] notation layer failed (数据落盘不受影响)")

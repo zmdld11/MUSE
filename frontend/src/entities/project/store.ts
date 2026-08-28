@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { DemoSong, Project, ScoreMode, ViewMode } from "./types";
+import type { DemoSong, PipelineProgress, Project, ViewMode } from "./types";
 
 export type PlaybackSource = "midi" | "audio" | "mix";
 export type ThemeName = "dark" | "light";
@@ -14,12 +14,6 @@ function initialFollowMode(): FollowMode {
   return localStorage.getItem("muse-follow") === "roll" ? "roll" : "playhead";
 }
 
-function initialScoreMode(): ScoreMode {
-  return localStorage.getItem("muse-score-mode") === "faithful"
-    ? "faithful"
-    : "quantized";
-}
-
 interface PlayerState {
   project: Project | null;
   loading: string | null; // 加载中提示文案
@@ -32,7 +26,8 @@ interface PlayerState {
   currentTime: number;
   viewMode: ViewMode;
   scoreTrack: string | null; // 乐谱页展示轨（instrument_class；null = 首轨）
-  scoreMode: ScoreMode; // 乐谱量化/忠实双模式（记谱规则v1 §4）
+  midiSource: "score" | "raw"; // 卷帘 MIDI：记谱后（谱面派生）| 处理前（转写原始）
+  processing: PipelineProgress | null; // 一键管线处理中（全局浮层）
   demoSongs: DemoSong[]; // 演示曲库（public/demo v2 清单；空 = 单曲/无）
   activeDemoId: string | null; // 当前加载的演示曲目 id
 
@@ -46,7 +41,8 @@ interface PlayerState {
   setCurrentTime: (t: number) => void;
   setViewMode: (v: ViewMode) => void;
   setScoreTrack: (cls: string | null) => void;
-  setScoreMode: (m: ScoreMode) => void;
+  setMidiSource: (s: "score" | "raw") => void;
+  setProcessing: (p: PipelineProgress | null) => void;
   setDemoSongs: (songs: DemoSong[], activeId: string | null) => void;
   toggleMute: (trackId: string) => void;
   toggleSolo: (trackId: string) => void;
@@ -63,7 +59,8 @@ export const usePlayerStore = create<PlayerState>((set) => ({
   currentTime: 0,
   viewMode: "roll",
   scoreTrack: null,
-  scoreMode: initialScoreMode(),
+  midiSource: "score",
+  processing: null,
   demoSongs: [],
   activeDemoId: null,
 
@@ -92,10 +89,8 @@ export const usePlayerStore = create<PlayerState>((set) => ({
   setCurrentTime: (t) => set({ currentTime: t }),
   setViewMode: (v) => set({ viewMode: v }),
   setScoreTrack: (cls) => set({ scoreTrack: cls }),
-  setScoreMode: (m) => {
-    localStorage.setItem("muse-score-mode", m);
-    set({ scoreMode: m });
-  },
+  setMidiSource: (s) => set({ midiSource: s }),
+  setProcessing: (p) => set({ processing: p }),
   setDemoSongs: (songs, activeId) => set({ demoSongs: songs, activeDemoId: activeId }),
   toggleMute: (trackId) =>
     set((s) => {

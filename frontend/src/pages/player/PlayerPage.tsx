@@ -1,8 +1,9 @@
 import { useRef, useState } from "react";
-import { FolderOpen, Loader2, Music4 } from "lucide-react";
+import { FolderOpen, Music4 } from "lucide-react";
 import { usePlayerStore } from "@/entities/project/store";
 import { PianoRoll } from "@/widgets/piano-roll/PianoRoll";
 import {
+  handlePickedFiles,
   isTauri,
   loadDemoProject,
   loadWebFiles,
@@ -13,13 +14,14 @@ import { Button } from "@/shared/ui/controls";
 export function PlayerPage() {
   const project = usePlayerStore((s) => s.project);
   const loading = usePlayerStore((s) => s.loading);
+  const processing = usePlayerStore((s) => s.processing);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dirInputRef = useRef<HTMLInputElement>(null);
 
   return (
     <div className="relative h-full w-full">
       <PianoRoll />
-      {!project && !loading && (
+      {!project && !loading && !processing && (
         <EmptyState
           onPickDir={() => {
             if (isTauri) {
@@ -31,9 +33,8 @@ export function PlayerPage() {
           onPickFiles={() => fileInputRef.current?.click()}
         />
       )}
-      {loading && <LoadingOverlay text={loading} />}
 
-      {/* Web 模式文件入口（浏览器开发 / 将来的网页版） */}
+      {/* Web 模式文件入口：纯音频 → 本地一键管线；自带 mid/info → 直接装载 */}
       <input
         ref={fileInputRef}
         type="file"
@@ -42,7 +43,7 @@ export function PlayerPage() {
         accept=".flac,.wav,.mp3,.ogg,.m4a,.aac,.mid,.json"
         onChange={(e) => {
           const files = Array.from(e.target.files ?? []);
-          if (files.length > 0) void loadWebFiles(files);
+          if (files.length > 0) handlePickedFiles(files);
           e.target.value = "";
         }}
       />
@@ -103,15 +104,6 @@ function EmptyState({
         </div>
         {error && <p className="text-xs text-red-400">{error}</p>}
       </div>
-    </div>
-  );
-}
-
-function LoadingOverlay({ text }: { text: string }) {
-  return (
-    <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-base/60 backdrop-blur-sm">
-      <Loader2 className="h-8 w-8 animate-spin text-accent" />
-      <p className="text-sm text-content-2">{text}</p>
     </div>
   );
 }

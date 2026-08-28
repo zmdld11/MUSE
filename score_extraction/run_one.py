@@ -52,9 +52,15 @@ def assemble_demo(out_dir: Path, audio: str, bpm: float) -> None:
     if not mids:
         print("[run_one] score_mid 为空（无准入轨道？），demo 组装中止")
         return
+    # 处理前对照（曲内 A/B 切换用）：根目录原始转写 mid 中、谱面准入类的
+    # 子集——对照只隔离记谱层差异（时值/量化），不掺稀疏轨删除效应
+    admitted = {Path(m).stem for m in mids}
+    raw_mids = sorted(p.name for p in out_dir.glob("*.mid")
+                      if p.stem in admitted)
     # 显示名用音频文件名（比目录 id 可读；notes.json 的 song 字段不可靠）
     (out_dir / "index.json").write_text(
-        json.dumps({"mids": mids, "audio": Path(audio).name,
+        json.dumps({"mids": mids, "raw_mids": raw_mids,
+                    "audio": Path(audio).name,
                     "name": Path(audio).stem}, ensure_ascii=False, indent=1),
         encoding="utf-8")
     (out_dir / "info.json").write_text(
@@ -102,7 +108,8 @@ def sync_to_frontend(out_dirs: list[Path]) -> None:
         if audio and (out_dir / audio).exists():
             shutil.copyfile(out_dir / audio, dst / audio)
         songs.append({"id": sid, "name": idx.get("name", sid), "dir": sid,
-                      "audio": audio, "mids": idx.get("mids", [])})
+                      "audio": audio, "mids": idx.get("mids", []),
+                      "raw_mids": idx.get("raw_mids", [])})
     (FRONTEND_DEMO / "index.json").write_text(
         json.dumps({"version": 2, "songs": songs}, ensure_ascii=False, indent=1),
         encoding="utf-8")
@@ -144,13 +151,17 @@ def main() -> int:
         Path(audio).stem
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # env 必须在 BPM 检测之前设置：detect_bpm 的 import 链会实例化
+    # src.config 的模块级单例，晚设的 MUSE_MULTI_SEPARATION 永远不生效
+    # （潜伏 bug：--sep off/demucs 一直被静默吞掉，2026-08-28 A/B 才暴露）
+    os.environ["MUSE_MULTI_INSTRUMENT"] = "1"
+    os.environ["MUSE_MULTI_SEPARATION"] = args.sep
+
     print(f"[run_one] 1/3 BPM 检测：{audio}")
     bpm = detect_bpm(audio)
     print(f"[run_one] bpm = {bpm}")
 
     print("[run_one] 2/3 多乐器管线（分离+转写+清洗+记谱）…")
-    os.environ["MUSE_MULTI_INSTRUMENT"] = "1"
-    os.environ["MUSE_MULTI_SEPARATION"] = args.sep
     from src.config import Config  # noqa: F401  （env 已就位后 import 生效）
     from src.multi_instrument import run_multi_instrument
     ok = run_multi_instrument(audio, str(out_dir), bpm)

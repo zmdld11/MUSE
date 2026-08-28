@@ -16,7 +16,11 @@ import {
   tauriReadBytes,
   tauriScanDir,
 } from "./fileAccess";
-import { resetMidiCache } from "@/features/playback/control";
+import {
+  activeEngine,
+  resetMidiCache,
+  resumePlaybackAt,
+} from "@/features/playback/control";
 
 interface RawProject {
   name: string;
@@ -128,8 +132,17 @@ async function buildAndLoad(raw: RawProject): Promise<Project> {
   let hasAudio = false;
   if (raw.audioBytes) {
     store.setLoading("解码音频…");
-    duration = await audioEngine.load(raw.audioBytes);
-    hasAudio = true;
+    try {
+      duration = await audioEngine.load(raw.audioBytes);
+      hasAudio = true;
+    } catch (e) {
+      // 原曲解码失败不致命：降级为 MIDI 播放（hasAudio=false），转写/谱面
+      // 结果保住——调用方可用 project.hasAudio 判断是否走兜底（2026-08-28
+      // 用户实测：管线 5 分钟跑完，最后一步解码 flac 抛"Unable to decode
+      // audio data"，整个结果被丢）
+      console.warn("[load] 原曲音频解码失败，降级为 MIDI 播放", e);
+      audioEngine.unload();
+    }
   }
 
   const project: Project = {
@@ -194,8 +207,13 @@ export async function loadWebFiles(files: File[]): Promise<void> {
 }
 
 /** 演示曲目（public/demo；v2 多曲清单 {version:2,songs:[…]} 每曲一子目录，
- * 旧单曲格式回退根目录加载。songId 省略 = 清单第一首） */
-export async function loadDemoProject(songId?: string): Promise<void> {
+ * 旧单曲格式回退根目录加载。songId 省略 = 清单第一首；source 选择记谱后/
+ * 处理前 MIDI 清单；resume 供曲内 A/B 切换恢复播放位置与播放态） */
+export async function loadDemoProject(
+  songId?: string,
+  source: "score" | "raw" = "score",
+  resume?: { pos: number; wasPlaying: boolean },
+): Promise<void> {
   let base = "/demo";
   let midNames = ["guitar.mid"];
   let audioName = "05_kyomu_vocal.flac";
@@ -206,7 +224,7 @@ export async function loadDemoProject(songId?: string): Promise<void> {
       const idx = (await r.json()) as {
         version?: number;
         songs?: { id: string; name?: string; dir?: string; audio?: string;
-                  mids?: string[] }[];
+                  mids?: string[]; raw_mids?: string[] }[];
         mids?: string[];
         audio?: string;
         name?: string;
@@ -215,11 +233,21 @@ export async function loadDemoProject(songId?: string): Promise<void> {
         const pick =
           idx.songs.find((s) => s.id === songId) ?? idx.songs[0];
         base = `/demo/${pick.dir ?? pick.id}`;
-        if (Array.isArray(pick.mids) && pick.mids.length > 0) midNames = pick.mids;
+        const scoreMids = Array.isArray(pick.mids) ? pick.mids : [];
+        const rawMids = Array.isArray(pick.raw_mids) ? pick.raw_mids : [];
+        midNames =
+          source === "raw" && rawMids.length > 0 ? rawMids : scoreMids;
+        if (midNames.length === 0) midNames = ["guitar.mid"];
         if (typeof pick.audio === "string" && pick.audio) audioName = pick.audio;
         if (typeof pick.name === "string" && pick.name) songName = pick.name;
         usePlayerStore.getState().setDemoSongs(
-          idx.songs.map((s) => ({ id: s.id, name: s.name ?? s.id })),
+          idx.songs.map((s) => ({
+            id: s.id,
+            name: s.name ?? s.id,
+            dir: s.dir ?? s.id,
+            mids: Array.isArray(s.mids) ? s.mids : [],
+            rawMids: Array.isArray(s.raw_mids) ? s.raw_mids : [],
+          })),
           pick.id,
         );
       } else {
@@ -232,6 +260,7 @@ export async function loadDemoProject(songId?: string): Promise<void> {
   } catch {
     /* 清单缺失时退回单轨 */
   }
+  usePlayerStore.getState().setMidiSource(source);
   const [audioR, infoR, ...midRs] = await Promise.all([
     fetch(`${base}/${audioName}`),
     fetch(`${base}/info.json`).catch(() => null),
@@ -261,6 +290,136 @@ export async function loadDemoProject(songId?: string): Promise<void> {
     infoText: infoR?.ok ? await infoR.text() : undefined,
     notation,
   });
+  if (resume) {
+    await resumePlaybackAt(resume.pos, resume.wasPlaying);
+  }
+}
+
+/** 曲内「记谱后 ↔ 处理前」切换：保留播放位置与播放态 */
+export async function switchDemoMidiSource(
+  source: "score" | "raw",
+): Promise<void> {
+  const s = usePlayerStore.getState();
+  if (s.midiSource === source || !s.activeDemoId) return;
+  const entry = s.demoSongs.find((d) => d.id === s.activeDemoId);
+  if (!entry) return;
+  if (source === "raw" && entry.rawMids.length === 0) return;
+  const wasPlaying = s.isPlaying;
+  const pos = activeEngine().currentTime;
+  await loadDemoProject(entry.id, source, { pos, wasPlaying });
+}
+
+/** 文件选择统一分流：混选 .mid → 直接装载已有产物；纯音频 → 本地一键管线 */
+export function handlePickedFiles(files: File[]): void {
+  const hasMid = files.some((f) => f.name.toLowerCase().endsWith(".mid"));
+  if (hasMid) {
+    void loadWebFiles(files);
+    return;
+  }
+  const audio = files.find((f) => /\.(flac|wav|mp3|ogg|m4a|aac)$/i.test(f.name));
+  if (audio) void startPipelineJob(audio);
+}
+
+/** 本地一键管线桥（score_extraction/pipeline_server.py，端口 8420） */
+const PIPE_BASE = "http://127.0.0.1:8420";
+
+/** 选择音频 → 上传给本地管线 → 轮询进度 → 自动装载产物 */
+export async function startPipelineJob(audio: File): Promise<void> {
+  const setP = usePlayerStore.getState().setProcessing;
+  try {
+    setP({ stage: "upload", pct: 1, label: "上传音频到本地管线…", elapsed: 0 });
+    const r = await fetch(`${PIPE_BASE}/transcribe`, {
+      method: "POST",
+      headers: { "x-filename": encodeURIComponent(audio.name) },
+      body: await audio.arrayBuffer(),
+    });
+    if (!r.ok) {
+      const detail = await r.text().catch(() => "");
+      throw new Error(detail || `管线服务返回 ${r.status}`);
+    }
+    const { job } = (await r.json()) as { job: string };
+    for (;;) {
+      await new Promise((res) => setTimeout(res, 600));
+      const pr = await fetch(`${PIPE_BASE}/progress/${job}`);
+      if (!pr.ok) throw new Error("进度查询失败");
+      const st = (await pr.json()) as {
+        stage: string; pct: number; label: string; elapsed: number;
+      };
+      setP(st);
+      if (st.stage === "done") break;
+      if (st.stage === "error") throw new Error(st.label || "管线处理失败");
+    }
+    // 产物装载：index.json 的 mids 清单 + notation + info（音频用本地 File）
+    const idxR = await fetch(`${PIPE_BASE}/files/${job}/index.json`);
+    if (!idxR.ok) throw new Error("管线产物缺失（index.json）");
+    const idx = (await idxR.json()) as {
+      mids?: string[]; name?: string; audio?: string;
+    };
+    const midNames = Array.isArray(idx.mids) ? idx.mids : [];
+    if (midNames.length === 0) throw new Error("管线未产出可播放 MIDI");
+    const [infoR, ...midRs] = await Promise.all([
+      fetch(`${PIPE_BASE}/files/${job}/info.json`).catch(() => null),
+      ...midNames.map((m) =>
+        fetch(`${PIPE_BASE}/files/${job}/${m}`).catch(() => null)),
+    ]);
+    const mids = midNames
+      .map((name, i) => ({ name, res: midRs[i] }))
+      .filter((m) => m.res && m.res.ok);
+    if (mids.length === 0) throw new Error("管线 MIDI 下载失败");
+    let notation: NotationMeta | undefined;
+    try {
+      const nr = await fetch(`${PIPE_BASE}/files/${job}/notation/notation.json`);
+      if (nr.ok) {
+        notation = parseNotationMeta(await nr.text(), {
+          kind: "url",
+          baseUrl: `${PIPE_BASE}/files/${job}`,
+        });
+      }
+    } catch {
+      /* 无记谱输出 */
+    }
+    setP({ stage: "done", pct: 100, label: "装载卷帘与乐谱…", elapsed: 0 });
+    const name = idx.name ?? audio.name.replace(/\.[^.]+$/, "");
+    const loadWith = async (audioBytes?: ArrayBuffer) =>
+      buildAndLoad({
+        name,
+        audioBytes,
+        mids: await Promise.all(
+          mids.map(async (m) => ({ name: m.name, bytes: await m.res!.arrayBuffer() })),
+        ),
+        infoText: infoR?.ok ? await infoR.text() : undefined,
+        notation,
+      });
+    let project = await loadWith(await audio.arrayBuffer());
+    if (!project.hasAudio) {
+      // 本地 File 解码失败 → 从桥取服务端留存的同一份音频再试（本地二次
+      // 读取/偶发解码异常时这路能救回来；文件名见 index.json 的 audio 字段）
+      try {
+        const af = await fetch(
+          `${PIPE_BASE}/files/${job}/${encodeURIComponent(idx.audio ?? "")}`);
+        if (af.ok) {
+          setP({ stage: "done", pct: 100, label: "重试装载原曲音频…", elapsed: 0 });
+          project = await loadWith(await af.arrayBuffer());
+        }
+      } catch {
+        /* 服务端副本也取不到 → 走无音频降级 */
+      }
+    }
+    if (!project.hasAudio) {
+      window.alert(
+        "原曲音频无法在浏览器解码，已用 MIDI 播放（转写与谱面不受影响）");
+    }
+    usePlayerStore.getState().setDemoSongs([], null); // 非演示曲
+    usePlayerStore.getState().setMidiSource("score");
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const hint = /fetch|network|Failed/i.test(msg)
+      ? "本地管线服务未启动：在 score_extraction 目录运行 env/python.exe pipeline_server.py 后重试"
+      : msg;
+    window.alert(`一键转写失败：${hint}`);
+  } finally {
+    usePlayerStore.getState().setProcessing(null);
+  }
 }
 
 export { isTauri };

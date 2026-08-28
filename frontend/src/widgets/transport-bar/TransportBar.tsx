@@ -21,7 +21,8 @@ import {
   setPlaybackRate,
   togglePlay,
 } from "@/features/playback/control";
-import { openDirectoryProject, loadDemoProject } from "@/features/library/loadProject";
+import { openDirectoryProject, loadDemoProject, switchDemoMidiSource } from "@/features/library/loadProject";
+import { TranscribeButton } from "@/features/library/TranscribeButton";
 import { IconButton, Segmented } from "@/shared/ui/controls";
 import { formatTime } from "@/shared/utils/cn";
 
@@ -41,6 +42,9 @@ export function TransportBar() {
   const setFollowMode = usePlayerStore((s) => s.setFollowMode);
   const demoSongs = usePlayerStore((s) => s.demoSongs);
   const activeDemoId = usePlayerStore((s) => s.activeDemoId);
+  const midiSource = usePlayerStore((s) => s.midiSource);
+  const projectName = usePlayerStore((s) => s.project?.name ?? "");
+  const activeSong = demoSongs.find((d) => d.id === activeDemoId);
   const fillRef = useRef<HTMLDivElement>(null);
   const knobRef = useRef<HTMLDivElement>(null);
 
@@ -76,6 +80,8 @@ export function TransportBar() {
       >
         <FolderOpen className="h-[18px] w-[18px]" />
       </IconButton>
+      {/* 识别新歌（常驻；空首页的"选择文件"同源分流逻辑） */}
+      <TranscribeButton />
 
       {/* 中央控制区 */}
       <div className="flex flex-1 items-center justify-center gap-1">
@@ -135,6 +141,16 @@ export function TransportBar() {
         {formatTime(currentTime)} / {formatTime(duration)}
       </span>
 
+      {/* 当前歌名（多曲下拉框出现时由下拉框展示，不重复） */}
+      {demoSongs.length <= 1 && projectName && (
+        <span
+          title={projectName}
+          className="max-w-[220px] shrink-0 truncate text-xs font-medium text-content-1"
+        >
+          {projectName}
+        </span>
+      )}
+
       {/* 演示曲库切歌（多曲清单时出现） */}
       {demoSongs.length > 1 && (
         <select
@@ -153,6 +169,22 @@ export function TransportBar() {
             </option>
           ))}
         </select>
+      )}
+
+      {/* 曲内 A/B：记谱后（谱面派生 MIDI）↔ 处理前（转写原始 MIDI） */}
+      {activeSong && activeSong.rawMids.length > 0 && (
+        <Segmented
+          options={[
+            { value: "score", label: "记谱后" },
+            { value: "raw", label: "处理前" },
+          ]}
+          value={midiSource}
+          onChange={(v) => {
+            void switchDemoMidiSource(v).catch(() => {
+              usePlayerStore.getState().setLoading(null);
+            });
+          }}
+        />
       )}
 
       {/* 倍速 */}

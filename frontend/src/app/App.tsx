@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { Check, Loader2 } from "lucide-react";
 import { usePlayerStore, visibleTracks } from "@/entities/project/store";
 import { audioEngine } from "@/features/playback/audioEngine";
 import { midiEngine } from "@/features/playback/midiEngine";
@@ -12,6 +13,7 @@ import { TransportBar } from "@/widgets/transport-bar/TransportBar";
 import { InstrumentPanel } from "@/widgets/instrument-panel/InstrumentPanel";
 import { PlayerPage } from "@/pages/player/PlayerPage";
 import { ScorePage } from "@/pages/score/ScorePage";
+import { formatTime } from "@/shared/utils/cn";
 
 export default function App() {
   const viewMode = usePlayerStore((s) => s.viewMode);
@@ -76,6 +78,80 @@ export default function App() {
         <main className="relative min-w-0 flex-1">
           {viewMode === "roll" ? <PlayerPage /> : <ScorePage />}
         </main>
+      </div>
+      <GlobalOverlays />
+    </div>
+  );
+}
+
+/** 全局浮层（盖住卷帘/乐谱两页）：加载提示 + 一键管线进度。
+ * 原先 LoadingOverlay 只挂在卷帘页，乐谱页播放时音色加载无反馈，用户
+ * 以为卡死（2026-08-28 用户报告）——提升到 App 层。 */
+function GlobalOverlays() {
+  const loading = usePlayerStore((s) => s.loading);
+  const processing = usePlayerStore((s) => s.processing);
+  return (
+    <>
+      {loading && (
+        <div className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-base/60 backdrop-blur-sm">
+          <Loader2 className="h-8 w-8 animate-spin text-accent" />
+          <p className="text-sm text-content-2">{loading}</p>
+        </div>
+      )}
+      {processing && <ProcessingOverlay stage={processing.stage} pct={processing.pct} label={processing.label} elapsed={processing.elapsed} />}
+    </>
+  );
+}
+
+const PIPE_STEPS: { id: string; label: string }[] = [
+  { id: "upload", label: "上传音频" },
+  { id: "bpm", label: "BPM 检测" },
+  { id: "separate", label: "乐器分离" },
+  { id: "transcribe", label: "多乐器转写" },
+  { id: "notation", label: "记谱 + 打包" },
+];
+
+function ProcessingOverlay(props: {
+  stage: string;
+  pct: number;
+  label: string;
+  elapsed: number;
+}) {
+  const idx = PIPE_STEPS.findIndex((s) => s.id === props.stage);
+  const activeIdx = props.stage === "done" ? PIPE_STEPS.length : idx;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-base/70 backdrop-blur-md">
+      <div className="w-[440px] max-w-[88vw] rounded-2xl border border-stroke bg-surface-1/95 px-8 py-7 shadow-2xl">
+        <div className="mb-1 text-sm font-medium text-content-1">
+          一键转写中…
+        </div>
+        <div className="mb-5 truncate text-xs text-content-3">{props.label}</div>
+        <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-2">
+          <div
+            className="h-full rounded-full bg-accent transition-[width] duration-500"
+            style={{ width: `${Math.max(1, Math.min(100, props.pct))}%` }}
+          />
+        </div>
+        <div className="tnum mt-2 flex justify-between text-[11px] text-content-3">
+          <span>{Math.floor(props.pct)}%</span>
+          <span>已用 {formatTime(props.elapsed)}</span>
+        </div>
+        <div className="mt-5 space-y-2.5">
+          {PIPE_STEPS.map((s, i) => (
+            <div key={s.id} className="flex items-center gap-2.5 text-xs">
+              {i < activeIdx ? (
+                <Check className="h-3.5 w-3.5 shrink-0 text-accent" />
+              ) : i === activeIdx ? (
+                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
+              ) : (
+                <span className="inline-block h-3.5 w-3.5 shrink-0 rounded-full border border-stroke" />
+              )}
+              <span className={i <= activeIdx ? "text-content-2" : "text-content-3"}>
+                {s.label}
+              </span>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );

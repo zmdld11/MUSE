@@ -160,6 +160,23 @@ function seekAll(t: number): void {
   usePlayerStore.getState().setCurrentTime(activeEngine().currentTime);
 }
 
+/** 换数据后恢复到原位置（记谱后/处理前 A/B 切换用）：加载 → seek → 续播。
+ * 引擎 seek 在未加载前会被 duration=0 截断，必须 load 之后 seek。 */
+export async function resumePlaybackAt(
+  pos: number,
+  wasPlaying: boolean,
+): Promise<void> {
+  if (!(await prepareEngines())) return;
+  applyMixGain();
+  const engs = activeEngines();
+  for (const e of engs) e.seek(pos);
+  if (wasPlaying && engs.length > 0) {
+    for (const e of engs) e.play();
+    usePlayerStore.getState().setPlaying(true);
+  }
+  usePlayerStore.getState().setCurrentTime(activeEngine().currentTime);
+}
+
 export function seekBy(delta: number): void {
   const eng = activeEngine();
   seekAll(eng.currentTime + delta);
