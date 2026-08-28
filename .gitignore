@@ -99,6 +99,9 @@ legacy_se34/
 score_extraction/train/*.pid
 se_cloud/
 
+# 会话工具本机配置（settings.local 等按惯例不进库）
+instrument_recognition/.claude/
+
 # Generated evaluation / training artifacts
 score_extraction/eval/cache/
 score_extraction/eval/reports/*.npy
