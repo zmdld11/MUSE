@@ -295,9 +295,16 @@ class Handler(BaseHTTPRequestHandler):
         if remaining > 0:
             self._json(400, {"error": "上传不完整"})
             return
-        # 内容去重：同一文件（md5）已完成 → 秒回旧 job，不重付 GPU 成本
+        # 内容去重：同一文件（md5）已完成 → 秒回旧 job，不重付 GPU 成本。
+        # 去重键掺入管线源码指纹：代码升级后旧产物自动失效（2026-08-29
+        # 吞音案：08-28 中午的中间版本产物 90 音，用户重传同名文件一直
+        # 秒回旧结果，无从触发重跑）。
         import hashlib
-        md5 = hashlib.md5(audio_path.read_bytes()).hexdigest()
+        pipe_stamp = hashlib.md5(
+            ";".join(f"{p.name}:{p.stat().st_mtime_ns}"
+                     for p in sorted((SE / "src").glob("*.py"))
+                     ).encode()).hexdigest()[:10]
+        md5 = pipe_stamp + hashlib.md5(audio_path.read_bytes()).hexdigest()
         with _LOCK:
             done_same = [
                 j for j, v in _JOBS.items()

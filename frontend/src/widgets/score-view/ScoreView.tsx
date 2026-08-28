@@ -106,19 +106,81 @@ function ScoreToolbar({ notation }: { notation: NotationMeta }) {
           );
         })}
       </div>
-      {notation.analysis?.summary ? (
-        <span
-          className="tnum hidden shrink-0 rounded-full border border-stroke px-2.5 py-1 text-[11px] text-content-2 lg:inline"
-          title="AI 乐曲分析（T4 v0：基于和弦轨与 Billboard 语料统计）"
-        >
-          {notation.analysis.summary}
-        </span>
-      ) : null}
+      <ChordStatsBadge analysis={notation.analysis} />
       {notation.key ? (
         <span className="tnum shrink-0 text-[11px] text-content-3">
           {notation.key}
         </span>
       ) : null}
+    </div>
+  );
+}
+
+/** 和弦分析徽章（第二阶段 #7）：性质大类 chips（数量+占比），hover 弹出
+ *  该类具体和弦细分；进行模板命中（王道/卡农/五度圈…）单独一排小徽章。
+ *  旧数据无 chord_quality_stats 时回退 summary 文本。 */
+function ChordStatsBadge({
+  analysis,
+}: {
+  analysis: NotationMeta["analysis"];
+}) {
+  if (!analysis) return null;
+  const cats = Object.entries(analysis.chord_quality_stats ?? {}).filter(
+    ([, v]) => v.count > 0,
+  );
+  const labels = analysis.chord_labels_by_category ?? {};
+  const total = analysis.chords ?? cats.reduce((s, [, v]) => s + v.count, 0);
+  const progHits = Object.entries(analysis.progressions?.hits ?? {}).filter(
+    ([, hits]) => hits > 0,
+  );
+  const progLabels = analysis.progressions?.labels ?? {};
+
+  if (!cats.length && !progHits.length) {
+    return analysis.summary ? (
+      <span
+        className="tnum hidden shrink-0 rounded-full border border-stroke px-2.5 py-1 text-[11px] text-content-2 lg:inline"
+        title="AI 乐曲分析（基于和弦轨与 Billboard 语料统计）"
+      >
+        {analysis.summary}
+      </span>
+    ) : null;
+  }
+  return (
+    <div className="flex shrink-0 flex-wrap items-center gap-1">
+      {progHits.map(([key, hits]) => (
+        <span
+          key={key}
+          className="tnum rounded-full border border-accent/50 bg-accent/10 px-2 py-0.5 text-[11px] text-content-2"
+          title="和弦进行模板命中次数（含旋转与变奏匹配）"
+        >
+          {progLabels[key] ?? key}×{hits}
+        </span>
+      ))}
+      {cats.map(([cat, v]) => (
+        <div key={cat} className="group relative">
+          <span className="tnum flex cursor-default items-center gap-1 rounded-full border border-stroke px-2 py-0.5 text-[11px] text-content-2 group-hover:border-accent/60 group-hover:bg-surface-2">
+            {cat}
+            <span className="text-content-3">{v.count}</span>
+            <span className="text-content-3">{Math.round(v.fraction * 100)}%</span>
+          </span>
+          <div className="pointer-events-none absolute bottom-full right-0 z-20 mb-1.5 hidden w-max min-w-32 rounded-md border border-stroke bg-surface-1 p-2 shadow-lg group-hover:block">
+            <div className="mb-1 text-[10px] text-content-3">
+              {cat}和弦细分（共 {v.count} / {total}）
+            </div>
+            {Object.entries(labels[cat] ?? {}).map(([label, c]) => (
+              <div
+                key={label}
+                className="tnum flex items-center justify-between gap-4 text-[11px] text-content-2"
+              >
+                <span>{label}</span>
+                <span className="text-content-3">
+                  ×{c} · {Math.round((c / Math.max(total, 1)) * 100)}%
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

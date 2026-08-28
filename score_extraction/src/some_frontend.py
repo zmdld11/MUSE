@@ -25,8 +25,54 @@ _CKPT = (Path(__file__).resolve().parents[1] / "external" / "some_pretrained"
 # 人声音域门（G2#–C6）：MIR-1K 实测业余男声低至 ~G2#（GP 基准 48 会误伤）
 VOCAL_PITCH_LO, VOCAL_PITCH_HI = 40, 84
 
+# 颤音/碎音修正层参数（第二阶段 #5 v1，2026-08-29）：SOME 输出 note 级
+# 连续音高，颤音/滑音被切成 ±1 半音内摆动的碎块（夏日实测 71→69.65→71
+# →69.2→69.17）；round 前合并碎块、保留连续值，消除"音抖得离谱"。
+VIB_SAME_DP = 0.5    # Δ≤此值=同音被切（offset 抖动），任意时长合并
+VIB_NEAR_DP = 1.5    # Δ≤此值且含碎块=颤音/滑音摆动，吸收合并
+VIB_SHORT_SEC = 0.30  # 碎块判据（人声稳定音典型 ≥0.3s）
+
 _INS = None
 _Slicer = None
+
+
+def _merge_vibrato(notes: list[dict]) -> list[dict]:
+    """无休止间隔的连续 run 内做碎块合并（音头保护：rest 边界=真实
+    换气/起音，绝不跨段；Δ>VIB_NEAR_DP 的音高跳变=真音符，不吞）。
+
+    合并块的音高 = 时长加权均值（对称颤音落中心，滑音偏向停留侧）。
+    """
+    out: list[dict] = []
+    run: list[dict] = []
+
+    def flush() -> None:
+        nonlocal run
+        if run:
+            total = sum(n["offset"] - n["onset"] for n in run)
+            pitch = sum(n["_midi"] * (n["offset"] - n["onset"])
+                        for n in run) / total
+            out.append({"onset": run[0]["onset"], "offset": run[-1]["offset"],
+                        "_midi": pitch})
+            run = []
+
+    prev_end = None
+    for n in notes:
+        # rest 间隔（时间缝）或跨 run 断裂 → 结束当前 run
+        if prev_end is not None and n["onset"] - prev_end > 1e-6:
+            flush()
+        if run:
+            gap_dp = abs(n["_midi"] - run[-1]["_midi"])
+            short = min(n["offset"] - n["onset"],
+                        run[-1]["offset"] - run[-1]["onset"]) < VIB_SHORT_SEC
+            if gap_dp <= VIB_SAME_DP or (gap_dp <= VIB_NEAR_DP and short):
+                run.append(n)
+                prev_end = n["offset"]
+                continue
+            flush()
+        run.append(n)
+        prev_end = n["offset"]
+    flush()
+    return out
 
 
 def _load():
@@ -57,7 +103,9 @@ def _load():
 def transcribe_some(audio_path: str) -> dict:
     """wav → {"notes": [...], "note_count": int}（instrument_class 恒 "melody"）。
 
-    note 字段与 ia-amt 前端对齐；pitch 取整（SOME 连续值留待颤音修正层）。
+    note 字段与 ia-amt 前端对齐。音高：先按 note 级连续值做颤音/碎块合并
+    （_merge_vibrato），合并块取时长加权均值，最后才取整——round 抖动的
+    根源是先取整后合并会把 ±1 摆动钉死成两个半音（2026-08-29 #5）。
     """
     import librosa
     import numpy as np
@@ -68,23 +116,29 @@ def transcribe_some(audio_path: str) -> dict:
     slicer = _Slicer(sr=_INS.config["audio_sample_rate"], max_sil_kept=1000)
     chunks = slicer.slice(waveform)
     midis = _INS.infer([c["waveform"] for c in chunks])
-    out = []
+    raw: list[dict] = []
     for chunk, seg in zip(chunks, midis):
-        pitches = np.round(seg["note_midi"]).astype(np.int64).tolist()
-        durs = np.asarray(seg["note_dur"], dtype=float).tolist()
-        rests = np.asarray(seg["note_rest"], dtype=bool).tolist()
+        pitches = np.asarray(seg["note_midi"], dtype=float)
+        durs = np.asarray(seg["note_dur"], dtype=float)
+        rests = np.asarray(seg["note_rest"], dtype=bool)
         t = float(chunk["offset"])
         for pitch, dur, rest in zip(pitches, durs, rests):
             end = t + float(dur)
-            if (not rest and end - t > 0.01
-                    and VOCAL_PITCH_LO <= int(pitch) <= VOCAL_PITCH_HI):
-                out.append({
-                    "onset": round(t, 4), "offset": round(end, 4),
-                    "pitch": int(pitch), "velocity": 100,
-                    "confidence": 1.0, "instrument_class": "melody",
-                })
+            if not rest and end - t > 0.01:
+                raw.append({"onset": round(t, 4), "offset": round(end, 4),
+                            "_midi": float(pitch), "velocity": 100})
             t = end
-    out.sort(key=lambda n: (n["onset"], n["pitch"]))
-    logger.info("[some] %d notes (vocal gate [%d,%d]) from %s",
-                len(out), VOCAL_PITCH_LO, VOCAL_PITCH_HI, audio_path)
-    return {"notes": out, "note_count": len(out)}
+    raw.sort(key=lambda n: n["onset"])
+    notes = []
+    for n in _merge_vibrato(raw):
+        pitch = int(round(n["_midi"]))
+        if VOCAL_PITCH_LO <= pitch <= VOCAL_PITCH_HI:
+            notes.append({
+                "onset": n["onset"], "offset": n["offset"],
+                "pitch": pitch, "velocity": 100,
+                "confidence": 1.0, "instrument_class": "melody",
+            })
+    notes.sort(key=lambda n: (n["onset"], n["pitch"]))
+    logger.info("[some] %d notes (raw %d, vibrato-merged, gate [%d,%d]) from %s",
+                len(notes), len(raw), VOCAL_PITCH_LO, VOCAL_PITCH_HI, audio_path)
+    return {"notes": notes, "note_count": len(notes)}

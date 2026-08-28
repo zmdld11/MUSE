@@ -100,6 +100,18 @@ def _largest_unit(bound: Fraction, vocab: list[Fraction]) -> Fraction:
     return max(MIN_DUR, best)
 
 
+def _note_frag_cost(d: Fraction) -> int:
+    """连奏片段代价（第二阶段 #2，2026-08-29 用户拍板"同小节合并"）：
+    附点不罚——附点四分单片 优于 8分+16分 tie（现代流行谱惯例；古典
+    跨拍附点拆分规范让位可读性，全库实测 739 处 1/2+1/4 / 83 处 1+1/2
+    tie 链由此消除）。三连音/复合值罚分保持（1/4+1/12 等位置性拆分
+    不受影响）。仅用于音符连奏填充；断奏(_largest_unit 宁短勿拖)与
+    休止符(_rest_pieces 古典跨拍拆分)沿用 _dur_cost。"""
+    if d in UNIT_DURS or d in DOTTED_DURS:
+        return 0
+    return _dur_cost(d)
+
+
 def _choose_fragments(onset_ql: Fraction, bound: Fraction,
                       ql_per_measure: Fraction = Fraction(4),
                       vocab: list[Fraction] | None = None,
@@ -141,7 +153,7 @@ def _choose_fragments(onset_ql: Fraction, bound: Fraction,
                 u = int(p / unit)
                 if u <= i and costs[i - u] is not None:
                     c, n, lst = costs[i - u]
-                    c2, n2 = (c + _dur_cost(p), n + 1)
+                    c2, n2 = (c + _note_frag_cost(p), n + 1)
                     if by_pieces:
                         c2, n2 = n2, c2
                     cand = (c2, n2, [p] + lst)
@@ -663,9 +675,13 @@ def _reassign_durations(events: list[dict], bpm: float,
                                                     ql_per_measure, vocab)
             else:
                 stats["detached" if ratio < DETACHED_RATIO else "middle"] += 1
-                # 休止符削减（v3）：间隔 ≤1 拍填满到声部内下一音头；
-                # >1 拍的短语沉默保持"缩短值+休止"
-                if voice_gap is not None and voice_gap <= FILL_GAP_MAX:
+                # 休止符削减（v3→v4，2026-08-29 第二阶段 #1）：middle 态
+                # （0.5≤ratio<0.85）放宽到 ≤2 拍填满——offset 偏短的转写值
+                # 走单值截断会在谱面留 1/12~1/2 拍无规律碎休止（全库 582
+                # 处 ≤1 拍真休止的主来源，canon 案例 raw 1.2→写 1→尾巴
+                # 1/3 变休止）；断奏（ratio<0.5）保持 ≤1 拍不吞（真顿挫）。
+                fill_max = FILL_GAP_MAX * 2 if ratio >= DETACHED_RATIO else FILL_GAP_MAX
+                if voice_gap is not None and voice_gap <= fill_max:
                     stats["gap_filled"] = stats.get("gap_filled", 0) + 1
                     bound = min(voice_gap, SUSTAIN_CAP)
                     ev["_frags_ql"] = _choose_fragments(

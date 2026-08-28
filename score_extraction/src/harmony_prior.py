@@ -270,6 +270,10 @@ _PROG_SEMIS = {1: 0, 2: 2, 3: 4, 4: 5, 5: 7, 6: 9, 7: 11}
 def _pattern_variants(digits: str) -> list[list[tuple[int, str]]]:
     """度数串 → (半音度数, 期望性质) 模板的全部旋转。"""
     base = [(_PROG_SEMIS[int(c)], _PROG_PARITY[int(c)]) for c in digits]
+    return _rotate_variants(base)
+
+
+def _rotate_variants(base: list[tuple[int, str]]) -> list[list[tuple[int, str]]]:
     n = len(base)
     return [[base[(i + j) % n] for j in range(n)] for i in range(n)]
 
@@ -278,6 +282,37 @@ ROYAL_ROAD_DIGITS = "4536"
 CANON_DIGITS = "15634145"
 CANON_VARIANT_DIGITS = "1563461"
 JUST_TWO_DIGITS = "1645"
+
+# 进行模板注册表（第二阶段 #7，2026-08-29）：半音+性质直接定义（支持
+# 调外借用音级）。马里奥进行 = ♭VI–♭VII–I（LOVE2000 视频 up 主"鸢梦"
+# 定义：前两降六降七离调自然小调、末回大调）；五度圈 6251 = vi–II7–V–I
+# （LOVE2000 主歌实测 I–IV–V–I–vi–II7–V–I 的尾四音，用户 08-28 拍板项）。
+PROGRESSION_TEMPLATES: dict[str, dict] = {
+    "royal_road": {"label": "王道进行", "digits": "4536"},
+    "canon": {"label": "卡农进行", "digits": "15634145"},
+    "canon_variant": {"label": "卡农变奏", "digits": "1563461"},
+    "just_two": {"label": "1645 进行", "digits": "1645"},
+    "mario": {"label": "马里奥进行", "base": [(8, "M"), (10, "M"), (0, "M")]},
+    "circle_6251": {"label": "五度圈 6251", "base": [(9, "m"), (2, "M"), (7, "M"), (0, "M")]},
+}
+
+
+def _template_variants(spec: dict) -> list[list[tuple[int, str]]]:
+    if "digits" in spec:
+        return _pattern_variants(spec["digits"])
+    return _rotate_variants(spec["base"])
+
+
+# 和弦性质大类（UI 二级展示用，第二阶段 #7）
+QUALITY_CATEGORIES: list[tuple[str, set[str]]] = [
+    ("大三", {""}),
+    ("小三", {"m"}),
+    ("属七", {"7"}),
+    ("大七", {"maj7"}),
+    ("小七", {"m7"}),
+    ("挂留", {"sus4"}),
+]
+_OTHER_QUALITY = "其他"
 _MAJORISH = {"", "7", "maj7", "sus4"}  # 大性质族（m/m7 为小性质族）
 DIATONIC_DEGREES = {0, 2, 4, 5, 7, 9, 11}
 SEVENTH_FAMILIES = {"7", "maj7", "m7"}
@@ -296,13 +331,19 @@ def _count_progression_v1(pairs: list[tuple[int, str | None]],
 
     输入先折叠连续同度数（"11 55 66…"复用形式归一到模板长度再比）。
     """
+    return _count_variants(pairs, _pattern_variants(digits), max_parity_miss)
+
+
+def _count_variants(pairs: list[tuple[int, str | None]],
+                    variants: list[list[tuple[int, str]]],
+                    max_parity_miss: int = 1) -> int:
     rle: list[tuple[int, str | None]] = []
     for deg, par in pairs:
         if rle and rle[-1][0] == deg:
             continue
         rle.append((deg, par))
     n = 0
-    for pat in _pattern_variants(digits):
+    for pat in variants:
         L = len(pat)
         for i in range(len(rle) - L + 1):
             miss = 0
@@ -321,17 +362,20 @@ def _count_progression_v1(pairs: list[tuple[int, str | None]],
     return n
 
 
-def _degree_seq(segments: list[dict], key_str: str) -> list[tuple[int, str]]:
-    """和弦段 → 调相对度数序列（去 N.C.；按度数去重——性质抖动=同一和弦）。"""
+def _degree_seq(segments: list[dict], key_str: str) -> list[tuple[int, str, str]]:
+    """和弦段 → 调相对度数序列（去 N.C.；按度数去重——性质抖动=同一和弦）。
+
+    元素 = (半音度数, 性质, 原始 label)；前两位沿用既有索引口径。
+    """
     tonic = _tonic_pc(key_str)
-    seq: list[tuple[int, str]] = []
+    seq: list[tuple[int, str, str]] = []
     for seg in segments:
         root, _ = parse_label(seg["label"])
         if root is None:
             continue
         deg = (root - tonic) % 12
         if not seq or seq[-1][0] != deg:
-            seq.append((deg, _quality_of(seg["label"])))
+            seq.append((deg, _quality_of(seg["label"]), seg["label"]))
     return seq
 
 
@@ -340,7 +384,7 @@ def score_analysis(segments: list[dict], key_str: str,
     """乐曲分析 v1：王道/卡农（含变奏）检出、语料常见度、独创度、和声复杂度。"""
     corpus = _load_corpus()
     seq = _degree_seq(segments, key_str)
-    pairs = [(deg, _parity_of_quality(q)) for deg, q in seq]
+    pairs = [(deg, _parity_of_quality(q)) for deg, q, _ in seq]
     n = len(seq)
     common = 0
     if corpus and n >= 2:
@@ -351,13 +395,33 @@ def score_analysis(segments: list[dict], key_str: str,
             if c_a > 0 and corpus["bigram"].get(f"{ka}>{kb}", 0) / c_a >= 0.02:
                 common += 1
     commonality = round(common / (n - 1), 3) if n >= 2 else 0.0
-    sevenths = sum(1 for _, q in seq if q in SEVENTH_FAMILIES)
-    borrowed = sum(1 for d, _ in seq if d not in DIATONIC_DEGREES)
-    rr = _count_progression_v1(pairs, ROYAL_ROAD_DIGITS)
-    ca = _count_progression_v1(pairs, CANON_DIGITS)
-    cv = _count_progression_v1(pairs, CANON_VARIANT_DIGITS)
-    jt = _count_progression_v1(pairs, JUST_TWO_DIGITS)
+    sevenths = sum(1 for _, q, _ in seq if q in SEVENTH_FAMILIES)
+    borrowed = sum(1 for d, _, _ in seq if d not in DIATONIC_DEGREES)
+    # 进行模板统一计数（结构化输出供前端二级展示）
+    prog_hits: dict[str, int] = {}
+    for key, spec in PROGRESSION_TEMPLATES.items():
+        prog_hits[key] = _count_variants(pairs, _template_variants(spec))
+    rr, ca, cv, jt = (prog_hits["royal_road"], prog_hits["canon"],
+                      prog_hits["canon_variant"], prog_hits["just_two"])
     canon_total = ca + cv
+    # 和弦性质大类统计（第二阶段 #7：与 chords:n 同口径=度数去重序列；
+    # 大类计数+占比，细分=该类下的具体和弦 label）
+    quality_counts: dict[str, int] = {}
+    labels_by_cat: dict[str, dict[str, int]] = {}
+    for _, q, label in seq:
+        for cat, members in QUALITY_CATEGORIES:
+            if q in members:
+                break
+        else:
+            cat = _OTHER_QUALITY
+        quality_counts[cat] = quality_counts.get(cat, 0) + 1
+        labels_by_cat.setdefault(cat, {})
+        labels_by_cat[cat][label] = labels_by_cat[cat].get(label, 0) + 1
+    quality_stats = {cat: {"count": c, "fraction": round(c / n, 3)}
+                     for cat, c in sorted(quality_counts.items(),
+                                          key=lambda kv: -kv[1])} if n else {}
+    labels_by_cat = {cat: dict(sorted(ls.items(), key=lambda kv: -kv[1]))
+                     for cat, ls in labels_by_cat.items()}
     return {
         "chords": n,
         "royal_road_hits": rr,
@@ -365,6 +429,11 @@ def score_analysis(segments: list[dict], key_str: str,
         "canon_classic_hits": ca,
         "canon_variant_hits": cv,
         "just_two_hits": jt,
+        "progressions": {"hits": prog_hits,
+                         "labels": {k: s["label"] for k, s in
+                                    PROGRESSION_TEMPLATES.items()}},
+        "chord_quality_stats": quality_stats,
+        "chord_labels_by_category": labels_by_cat,
         "commonality": commonality,            # 语料常见进行覆盖率
         "originality": round(1.0 - commonality, 3),
         "seventh_fraction": round(sevenths / n, 3) if n else 0.0,

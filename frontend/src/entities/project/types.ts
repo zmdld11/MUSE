@@ -52,7 +52,19 @@ export interface NotationMeta {
   kind: "url" | "fs"; // 浏览器演示（fetch 相对路径）| Tauri 目录（read_bytes）
   baseUrl: string; // kind=url → "/demo"；kind=fs → 曲目目录绝对路径
   key?: string; // 调号估计（"E major"）
-  analysis?: { summary?: string } & Record<string, unknown>; // T4 乐曲分析
+  analysis?: {
+    summary?: string;
+    chords?: number;
+    /** 进行模板命中（第二阶段 #7）：hits 键 → 次数；labels 键 → 中文名 */
+    progressions?: {
+      hits: Record<string, number>;
+      labels: Record<string, string>;
+    };
+    /** 和弦性质大类：名称 → 数量/占比 */
+    chord_quality_stats?: Record<string, { count: number; fraction: number }>;
+    /** 大类 → 具体和弦 label → 次数（hover 弹窗细分） */
+    chord_labels_by_category?: Record<string, Record<string, number>>;
+  } & Record<string, unknown>; // T4 乐曲分析
   tracks: NotationTrackMeta[];
   /** 真实时间→谱面 QL 分段线性表（rubato 曲目光标同步；缺省回退名义 bpm） */
   timeMap?: [number, number][];
