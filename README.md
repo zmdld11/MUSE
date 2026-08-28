@@ -107,7 +107,7 @@ progress.md findings.md  开发日志与实验结论（持续更新）
 
 - [Demucs](https://github.com/adefossez/demucs)（htdemucs_6s）— 乐器分离
 - [MelBand-RoFormer](https://github.com/sucvr/ConvertModel_RoFormer_CaPtions)（KimberleyJSN 权重）与 [MSST](https://github.com/ZFTurbo/Music-Source-Separation-Training) — 人声分离
-- [ia-amt](https://github.com/bytedance/iamt)（instrument-agnostic AMT）— 多乐器转写
+- [ia-amt](https://github.com/anime-song/instrument-agnostic-amt)（instrument-agnostic AMT）— 多乐器转写
 - [SOME](https://github.com/openvpi/SOME)（ISMIR 2022）— 人声音符级转写
 - [basic-pitch](https://github.com/spotify/basic-pitch)（Spotify）— 评测基线
 - [OpenSheetMusicDisplay](https://github.com/opensheetmusicdisplay/opensheetmusicdisplay) — 五线谱渲染
