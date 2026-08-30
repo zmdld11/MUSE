@@ -1,12 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { FileMusic, Loader2 } from "lucide-react";
+import { FileMusic, Loader2, Mic } from "lucide-react";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { usePlayerStore } from "@/entities/project/store";
 import type { NotationMeta } from "@/entities/project/types";
 import { activeEngine } from "@/features/playback/control";
 import { tauriReadBytes } from "@/features/library/fileAccess";
+import { familyFromInstrumentClass } from "@/features/library/loadProject";
 import { familyColor } from "@/shared/theme/instrumentColors";
 import { cn } from "@/shared/utils/cn";
+
+/** 人声类（melody/vocal_harmony/choir）暂不出五线谱：人声专用谱
+ *  （歌词对照）规划在下一阶段，本阶段先隐藏（2026-08-29 #4） */
+function isVocalClass(cls: string): boolean {
+  return familyFromInstrumentClass(cls) === "vocal";
+}
 
 /**
  * 乐谱视图（M4）：OSMD 渲染管线 notation/ 产物。
@@ -73,12 +80,20 @@ function ScoreToolbar({ notation }: { notation: NotationMeta }) {
   const scoreTrack = usePlayerStore((s) => s.scoreTrack);
   const setScoreTrack = usePlayerStore((s) => s.setScoreTrack);
 
-  const active = scoreTrack ?? notation.tracks[0].instrumentClass;
+  // 人声类不出页签；默认选中首个非人声轨（scoreTrack 由乐器面板点人声轨
+  // 置位时，谱面区显示占位卡片）
+  const scoreTracks = notation.tracks.filter(
+    (t) => !isVocalClass(t.instrumentClass),
+  );
+  const active =
+    scoreTrack ??
+    scoreTracks[0]?.instrumentClass ??
+    notation.tracks[0].instrumentClass;
 
   return (
     <div className="flex flex-wrap items-center gap-2 border-b border-stroke px-6 py-2.5">
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
-        {notation.tracks.map((t) => {
+        {scoreTracks.map((t) => {
           const mt = project?.tracks.find((tr) =>
             tr.id.startsWith(`${t.instrumentClass}.mid:`),
           );
@@ -163,7 +178,7 @@ function ChordStatsBadge({
             <span className="text-content-3">{v.count}</span>
             <span className="text-content-3">{Math.round(v.fraction * 100)}%</span>
           </span>
-          <div className="pointer-events-none absolute bottom-full right-0 z-20 mb-1.5 hidden w-max min-w-32 rounded-md border border-stroke bg-surface-1 p-2 shadow-lg group-hover:block">
+          <div className="pointer-events-none absolute top-full right-0 z-20 mt-1.5 w-max min-w-32 translate-y-1 rounded-md border border-stroke bg-surface-1 p-2 opacity-0 shadow-lg transition-all duration-150 group-hover:translate-y-0 group-hover:opacity-100">
             <div className="mb-1 text-[10px] text-content-3">
               {cat}和弦细分（共 {v.count} / {total}）
             </div>
@@ -188,7 +203,13 @@ function ChordStatsBadge({
 function ScoreCanvas({ notation }: { notation: NotationMeta }) {
   const project = usePlayerStore((s) => s.project);
   const scoreTrack = usePlayerStore((s) => s.scoreTrack);
-  const active = scoreTrack ?? notation.tracks[0].instrumentClass;
+  const nonVocal = notation.tracks.find(
+    (t) => !isVocalClass(t.instrumentClass),
+  );
+  const active =
+    scoreTrack ??
+    nonVocal?.instrumentClass ??
+    notation.tracks[0].instrumentClass;
   const trackMeta = useMemo(
     () => notation.tracks.find((t) => t.instrumentClass === active),
     [notation, active],
@@ -202,6 +223,7 @@ function ScoreCanvas({ notation }: { notation: NotationMeta }) {
   const anchorsRef = useRef<{ ql: number; x: number; rowIdx: number }[]>([]);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const lastScrolledRef = useRef(-1);
+  const qlPerMeasureRef = useRef(4); // 每小节四分数（拍号 3/4=3、6/8=3）
   const [renderToken, setRenderToken] = useState(0); // 渲染完成信号
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -298,6 +320,28 @@ function ScoreCanvas({ notation }: { notation: NotationMeta }) {
         }[] = [];
         const anchors: { ql: number; x: number; rowIdx: number }[] = [];
         const ml = inst.graphic?.MeasureList ?? [];
+        // 每小节四分数（拍号推导，替代硬编码 4 拍）：SourceMeasures 时间戳
+        // 单位 = whole note，相邻小节差的中位数 ×4 即每小节 quarter 数——
+        // 3/4、6/8 曲沿用 *4 会整体越播越歪
+        const srcMeasures = inst.Sheet?.SourceMeasures ?? [];
+        const wholeTs: number[] = [];
+        for (let i = 0; i < ml.length && i < srcMeasures.length; i++) {
+          const ts = srcMeasures[i]?.AbsoluteTimestamp;
+          wholeTs.push(
+            ts ? Number(ts.RealValue ?? (ts.n ?? 0) / (ts.d ?? 1)) : i,
+          );
+        }
+        const tsDiffs: number[] = [];
+        for (let i = 1; i < wholeTs.length; i++) {
+          const d = wholeTs[i] - wholeTs[i - 1];
+          if (d > 0.01) tsDiffs.push(d);
+        }
+        tsDiffs.sort((a, b) => a - b);
+        const qlPerMeasure = tsDiffs.length
+          ? Math.round(tsDiffs[Math.floor(tsDiffs.length / 2)] * 4 * 24) / 24
+          : 4;
+        qlPerMeasureRef.current = qlPerMeasure;
+        const barShift = trackMeta.minBar * qlPerMeasure;
         for (let i = 0; i < ml.length; i++) {
           let x = Infinity;
           let w = 0;
@@ -324,16 +368,13 @@ function ScoreCanvas({ notation }: { notation: NotationMeta }) {
             }
           }
           if (!isFinite(x)) continue;
-          const ts = inst.Sheet?.SourceMeasures?.[i]?.AbsoluteTimestamp;
-          // 谱内时间统一 whole 单位（4/4 一小节 = 1），fallback i 即第 i 小节
-          const qlWholes = ts
-            ? Number(ts.RealValue ?? (ts.n ?? 0) / (ts.d ?? 1))
-            : i;
-          // 小节时间戳是渲染谱相对值；timeMap 的 QL 是全曲绝对值（quarter）
-          rows.push({ ql: qlWholes * 4 + trackMeta.minBar * 4, x, w, yTop, yBot });
+          // 谱内时间统一 whole 单位；timeMap 的 QL 是全曲绝对值（quarter）
+          // 小节时间戳是渲染谱相对值 + barShift 平移到全曲绝对域
+          const qlWholes = wholeTs[i] ?? i;
+          rows.push({ ql: qlWholes * 4 + barShift, x, w, yTop, yBot });
           for (const e of entries) {
             anchors.push({
-              ql: e.ql + trackMeta.minBar * 4,
+              ql: e.ql + barShift,
               x: e.x,
               rowIdx: rows.length - 1,
             });
@@ -350,11 +391,12 @@ function ScoreCanvas({ notation }: { notation: NotationMeta }) {
         }
         anchorsRef.current = dedup;
         const ov = document.createElement("div");
+        // 无 left transition：rAF 逐帧定位本身平滑；换行时 left 跨千像素
+        // 过渡反而产生"向左扫回行首"残影（2026-08-29 光标漂移报告#3）
         ov.style.cssText =
           "position:absolute;z-index:5;pointer-events:none;display:none;" +
           "width:3px;border-radius:2px;background:rgba(225,29,72,0.9);" +
-          "box-shadow:0 0 0 1px rgba(225,29,72,0.25);" +
-          "transition:left 60ms linear;";
+          "box-shadow:0 0 0 1px rgba(225,29,72,0.25);";
         el.appendChild(ov);
         overlayRef.current = ov;
         setRenderToken((n) => n + 1);
@@ -384,23 +426,37 @@ function ScoreCanvas({ notation }: { notation: NotationMeta }) {
       const anchors = anchorsRef.current;
       if (ov && rows.length > 0) {
         const eng = activeEngine();
-        const t =
-          eng.duration > 0
-            ? eng.currentTime
-            : usePlayerStore.getState().currentTime;
+        const st = usePlayerStore.getState();
+        // 装载/换曲窗口保护：引擎未就绪（duration=0）或项目换装中
+        // （loading 非空，audioEngine 仍挂旧曲）时时间域是旧的——隐藏
+        // 光标，而非拿陈旧 store.currentTime 画新谱（曾表现为"突然跳回
+        // 第一行开头、播放恢复后跳回来"，2026-08-29 漂移报告#1）
+        if (eng.duration <= 0 || st.loading !== null) {
+          ov.style.display = "none";
+          lastScrolledRef.current = -1;
+          raf = requestAnimationFrame(tick);
+          return;
+        }
+        const t = eng.currentTime;
         // t → QL（timeMap 反查；缺省回退名义 bpm）
         const tm = notation.timeMap;
         const bpm = project?.bpm ?? 120;
-        const offsetSec = trackMeta.minBar * 4 * (60 / bpm);
+        const barQl = trackMeta.minBar * qlPerMeasureRef.current;
         let ql: number;
         if (tm && tm.length >= 2) {
+          // 二分找最后一个采样点 ≤ t（此前每帧线性扫，timeMap ~500 点）
           let lo = 0;
-          while (lo < tm.length - 2 && tm[lo + 1][0] < t) lo++;
+          let hi = tm.length - 1;
+          while (lo < hi) {
+            const mid = (lo + hi + 1) >> 1;
+            if (tm[mid][0] <= t) lo = mid;
+            else hi = mid - 1;
+          }
           const [t0, q0] = tm[lo];
-          const [t1, q1] = tm[lo + 1];
+          const [t1, q1] = tm[Math.min(lo + 1, tm.length - 1)];
           ql = t1 > t0 ? q0 + ((t - t0) / (t1 - t0)) * (q1 - q0) : q0;
         } else {
-          ql = ((t - offsetSec) * bpm) / 60 + trackMeta.minBar * 4;
+          ql = ((t - barQl * (60 / bpm)) * bpm) / 60 + barQl;
         }
         const inst = osmdRef.current as unknown as { Zoom?: number };
         const zoom = inst?.Zoom ?? 1;
@@ -427,7 +483,10 @@ function ScoreCanvas({ notation }: { notation: NotationMeta }) {
             else hi = mid - 1;
           }
           const r = rows[idx];
-          const frac = Math.max(0, Math.min(1, (ql - r.ql) / 4));
+          const frac = Math.max(
+            0,
+            Math.min(1, (ql - r.ql) / qlPerMeasureRef.current),
+          );
           x = r.x + frac * r.w;
           rowIdx = idx;
         }
@@ -450,6 +509,15 @@ function ScoreCanvas({ notation }: { notation: NotationMeta }) {
     return () => cancelAnimationFrame(raf);
   }, [renderToken, notation, trackMeta, project?.bpm]);
 
+  // 人声轨：不出谱（占位卡片；containerRef 不渲染 → 渲染 effect 自然跳过）
+  if (isVocalClass(active)) {
+    return (
+      <div className="relative mx-auto max-w-[1140px]">
+        <VocalScorePlaceholder />
+      </div>
+    );
+  }
+
   return (
     <div className="relative mx-auto max-w-[1140px]">
       {(busy || error) && (
@@ -468,6 +536,25 @@ function ScoreCanvas({ notation }: { notation: NotationMeta }) {
       {/* 谱面用纸张底色（乐谱惯例），不随主题反色 */}
       <div className="overflow-hidden rounded-xl bg-[#fffdf8] shadow-lg ring-1 ring-black/5">
         <div ref={containerRef} className="min-h-[420px] px-5 py-3" />
+      </div>
+    </div>
+  );
+}
+
+/** 人声谱占位：人声将有带歌词对照的专用谱面（下一阶段），旋律先看卷帘 */
+function VocalScorePlaceholder() {
+  return (
+    <div className="flex min-h-[420px] items-center justify-center p-8">
+      <div className="flex max-w-md flex-col items-center gap-4 rounded-2xl border border-stroke bg-surface-1/60 px-10 py-10 text-center backdrop-blur-xl">
+        <div className="flex h-16 w-16 items-center justify-center rounded-full bg-accent/15">
+          <Mic className="h-8 w-8 text-accent" />
+        </div>
+        <h2 className="text-lg font-medium text-content-1">人声专用谱开发中</h2>
+        <p className="text-sm leading-relaxed text-content-2">
+          人声将有带歌词对照的专用谱面（下一阶段推出）。
+          <br />
+          当前可在下方卷帘查看人声旋律的音高与节奏。
+        </p>
       </div>
     </div>
   );

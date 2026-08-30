@@ -115,13 +115,20 @@ def _note_frag_cost(d: Fraction) -> int:
 def _choose_fragments(onset_ql: Fraction, bound: Fraction,
                       ql_per_measure: Fraction = Fraction(4),
                       vocab: list[Fraction] | None = None,
-                      max_pieces: int = 3) -> list[Fraction]:
+                      max_pieces: int | None = None) -> list[Fraction]:
     """连奏精确填满 bound 的最小代价片段链（时值 v2 核心）。
 
     约束：片段不穿小节线（小节内可多片，跨小节必在小节线处切）；
     词表 = 语境词表 ∪ {1/12, 1/6}（奇数 twelfth 的精确填充需要，
     两者均为合法单值）。链超 max_pieces 片时退化为最少片数解。
+
+    max_pieces 自适应（2026-08-29 超长连音线反馈）：总量 ≥1 拍限 2 片
+    （长持续音 = 干净的 [到小节线, 整小节值] 结构；曾产出 4 拍 5 片
+    跨 2 小节的链，全库 ≥3 拍链 111 个）；小同步切分（<1 拍）仍允许
+    3 片（1/4+1/6+1/3 类三连系短弧是诚实记谱）。
     """
+    if max_pieces is None:
+        max_pieces = 2 if bound >= 1 else 3
     base = list(vocab if vocab is not None else ALL_DURS)
     fill_vocab = sorted(set(base) | {Fraction(1, 12), Fraction(1, 6)},
                         reverse=True)
@@ -179,7 +186,30 @@ def _choose_fragments(onset_ql: Fraction, bound: Fraction,
                 break
             alt.extend(seg)
         if alt and len(alt) < len(pieces):
-            return alt
+            pieces = alt
+    if len(pieces) > max_pieces:
+        # 硬顶：搜索 ≤max_pieces 片可表达的最大总时值（宁留小间隙也不
+        # 出长 tie 链——by_pieces 只是减片数，三连系起拍位的 5/12 段最少
+        # 也要 2 片，跨线即 3+ 片；4/5 片 ≥2 拍怪物链的根治，2026-08-29）。
+        # 候选 = 逐片合法单值贪心扩张，片不越小节线
+        best_total = Fraction(0)
+        for n_try in (max_pieces, 1):
+            cur = onset_ql
+            total = Fraction(0)
+            for _p in range(n_try):
+                m_end = (cur // ql_per_measure + 1) * ql_per_measure
+                take = max((v for v in fill_vocab
+                            if v <= min(bound - total, m_end - cur)
+                            and (v > 0)), default=Fraction(0))
+                if take <= 0:
+                    break
+                total += take
+                cur += take
+            best_total = max(best_total, total)
+            if best_total >= bound:
+                break
+        return _choose_fragments(onset_ql, best_total, ql_per_measure,
+                                 vocab, max_pieces=max_pieces)
     return pieces or [MIN_DUR]
 
 # 节奏简化常量（记谱规则v1 §3.4）
@@ -223,13 +253,34 @@ def _snap(fr: Fraction, denom: int) -> Fraction:
     return Fraction(round(fr * denom), denom)
 
 
-def _prior_snap_units(x: float) -> int:
+# 等音拼写规范化：估计器输出的音名是升号侧（PITCH_NAMES 全 #），大调
+# A#(10#)/D#(9#)/G#(8#) 超 7 个调号——满屏升降号，且 VexFlow/OSMD 渲染
+# >7 调号会崩（谱面加载不出的元凶之一）。2026-08-29 用户"升降号太多/
+# 调性识别错"反馈：识别的音级集合没错，错的是拼写侧。
+_ENHARMONIC_MAJOR = {"A#": "Bb", "D#": "Eb", "G#": "Ab"}
+
+
+def _spell_key(key_sig: str) -> str:
+    parts = key_sig.strip().split()
+    if len(parts) == 2 and parts[1] == "major" and parts[0] in _ENHARMONIC_MAJOR:
+        fixed = _ENHARMONIC_MAJOR[parts[0]]
+        logger.info("  [notation] key spelling: %s → %s major（调号 ≤7）",
+                    parts[0], fixed)
+        return f"{fixed} major"
+    return key_sig
+
+
+def _prior_snap_units(x: float, compound: bool = False) -> int:
     """格点计数 → 整数（节拍先验吸附；Cemgil 2003 位置先验 p(τ mod 1)
     的离散化：整拍 0.80 > 半拍 0.15 > 三连 0.008）。
 
     演奏前置/滞后 ≤ 亚记谱精度（~0.85 格 ≈ 50ms）时吸收到更粗的格点
     （整拍/半拍/八分）——人类刻谱同样把 50ms 的 anticipation 记在拍上
     （canon 实测第二拍和弦稳定 1.917 而非 2.0）；其余位置取最近格。
+
+    compound=True（复合拍 6/8、9/8、12/8，R1.3 GRID_POLICY）：三连八分位
+    （k%4==0）就是其正格八分，给与二分半拍同级 bonus——单拍型（4/4 等）
+    三连位无 bonus（转写抖动吸到三连位=假三连的根源，34.8% vs 参考 10.9%）。
     """
     import math
     lo, hi = math.floor(x), math.ceil(x)
@@ -244,6 +295,8 @@ def _prior_snap_units(x: float) -> int:
             return 3          # 半拍
         if k % 3 == 0:
             return 2          # 八分（含三连 4/12）
+        if compound and k % 4 == 0:
+            return 2          # 复合拍：三连八分=正格八分
         return 1 if k % 2 == 0 else 0
 
     def _cost(k: int, d: float) -> float:
@@ -253,7 +306,69 @@ def _prior_snap_units(x: float) -> int:
     return int(lo if _cost(lo, dlo) <= _cost(hi, dhi) else hi)
 
 
-def _fit_grid_map(notes: list[dict], bpm: float):
+BEAT_ATTRACT_UNITS = 0.9   # 强拍吸附窗（1/12 格单位）。≤0.9 与拍吸收窗
+                            # 同宽：只兜相位精修后的残差。曾试 1.35——把
+                            # 参考谱拍前/拍后的 32 分对双双吸上拍撞同槽，
+                            # roundtrip 丢 33 音（音头保真铁律红线）
+
+
+def _attract_units(k: int, beat_units: int) -> int:
+    """向拍点吸附（R1.4 重拍优先）：k 距最近拍点 ≤BEAT_ATTRACT_UNITS 时
+    吸上拍。beat_units = 一次拍在 1/12 格里的单位数（四分拍=12）。
+    MUSE_NO_ATTRACT=1 关闭（A/B 探针）。"""
+    if beat_units <= 1 or os.environ.get("MUSE_NO_ATTRACT"):
+        return k
+    q, r = divmod(k, beat_units)
+    if r and (r <= BEAT_ATTRACT_UNITS or beat_units - r <= BEAT_ATTRACT_UNITS):
+        return (q + (1 if r * 2 > beat_units else 0)) * beat_units
+    return k
+
+
+def _beat_units_for(pulse_ql: float) -> int:
+    """拍吸附的拍单位（1/12 格）：tactus 取 max(pulse×2, 四分) 封顶 12
+    ——八分脉冲曲吸到四分拍、四分脉冲吸四分拍。"""
+    return max(3, min(12, int(round(pulse_ql * 12 * 2))))
+
+
+def _infer_meter(ks, vel, pulse_ql: float) -> dict:
+    """拍号推断（R1.1）：对小节脉冲数 n ∈ {2,3,4,6}（ql_pm=n·pulse_ql≤4）
+    假设各算 downbeat 槽位的 onset 速度富集度（enrich = downbeat 槽速度
+    占比 × 槽数，均匀=1），弱 4/4 周期 ∧ 显著更强假设才离开 4/4。
+
+    返回 {"tsig", "ql_pm", "bar_pulses", "bar_phase", "enrich"}。
+    """
+    import numpy as np
+    cands = sorted({n for n in (2, 3, 4, 6)
+                    if 2 <= n and n * pulse_ql <= 4.0 + 1e-9} | {4})
+    best = None  # (enrich, n, p)
+    for n in cands:
+        for p in range(n):
+            d = np.abs((ks - p) % n)
+            d = np.minimum(d, n - d)
+            s = float((vel * (d < 0.35)).sum())
+            enrich = s / max(float(vel.sum()), 1e-9) * n
+            if best is None or enrich > best[0] + 1e-9:
+                best = (enrich, n, p)
+    e4 = max((e for e, n, _p in [best] if n == 4), default=1.0)
+    if best is None or best[1] == 4 or e4 >= 1.15 or best[0] < 1.35:
+        n, p = 4, best[2] if best else 0
+    else:
+        n, p = best[1], best[2]
+    ql_pm = round(n * pulse_ql * 12) / 12
+    if abs(pulse_ql - 1.0) < 1e-6:
+        tsig = f"{n}/4" if n in (2, 3, 4) else "4/4"
+    elif abs(pulse_ql - 0.5) < 1e-6 and n == 6:
+        tsig = "6/8"          # 六个八分脉冲 = 3Q 小节
+    else:
+        tsig = "4/4"
+        n, ql_pm = 4, 4.0
+    return {"tsig": tsig, "ql_pm": str(Fraction(ql_pm).limit_denominator(12)),
+            "bar_pulses": n, "bar_phase": p,
+            "enrich": round(best[0], 3) if best else None}
+
+
+def _fit_grid_map(notes: list[dict], bpm: float,
+                  beat_units: int = 12, compound: bool = False):
     """时值 v3.1 音头映射：全局 (bpm,φ) 联合精修 + 分段线性速度漂移跟踪。
 
     模型 = Cemgil 2003（量化=推断，速度偏差平滑游走）的分段化：谱面格点
@@ -346,11 +461,13 @@ def _fit_grid_map(notes: list[dict], bpm: float):
         n_win = len(centers)
 
     def ql_map(t: float) -> Fraction:
-        return Fraction(max(_prior_snap_units(F(t)), 0), 12)
+        k = _prior_snap_units(F(t), compound)
+        k = _attract_units(k, beat_units)
+        return Fraction(max(k, 0), 12)
 
     def resid_map(t: float) -> Fraction:
         v = F(t)
-        return Fraction(round(abs(v - _prior_snap_units(v)) * 2**20),
+        return Fraction(round(abs(v - _prior_snap_units(v, compound)) * 2**20),
                         2**20)
 
     meta = {"bpm_refined": round(bpm_ref, 2),
@@ -362,48 +479,75 @@ def _fit_grid_map(notes: list[dict], bpm: float):
 
 def _beat_sync_map(notes: list[dict], beat_times, pulse_sec: float,
                    bpm: float):
-    """拍同步格点映射（时值 v3.2）：beat k → QL k·pulse_ql。
+    """拍同步格点映射（时值 v3.2 → R1 拍感知版）。
 
     素材 = 音频节拍跟踪（src/beat_track.py）。librosa 拍是脉冲级（四分/
-    八分/半分），pulse_ql 吸附到 {1/4, 1/3, 1/2, 1, 2}；小节相位（弱起
-    偏移）由 onset 速度权重在小节内位置上投票（2 拍和声变化的曲子 p 与
-    p+bar/2 同分属正常，取先验最近）。返回结构与 _fit_grid_map 一致。
+    八分/半分），pulse_ql 吸附到 {1/4, 1/3, 1/2, 1, 2}；v3.2 之上的增强：
+    - R1.5 拍相位精修：近拍 onset 的系统性偏移中位数全局校正（canon
+      42~61ms 早拍把 onset 推出 0.9 格拍吸收窗 → 23/12、5/6 假三连位，
+      m5/m9 三连32分碎休止与 m19 伪等值 tie 的总根源）；
+    - R1.1 拍号推断：downbeat 槽位速度富集度投票（4/4 强先验，弱周期
+      ∧显著更强假设才切 3/4、2/4、6/8——此前全曲库硬编码 4/4，
+      gymnopedie 3/4 全被错切）；
+    - R1.4 强拍吸附：拍点 1.35 格内的 onset 吸上拍（重拍优先）。
+    返回结构与 _fit_grid_map 一致，meta 附 meter。
     """
     import numpy as np
     bt = np.asarray(beat_times, dtype=float)
     pulse_ql = min([0.25, 1 / 3, 0.5, 1.0, 2.0],
                    key=lambda x: abs(x - pulse_sec / (60.0 / bpm)))
-    bar_pulses = int(round(4.0 / pulse_ql))
     ks_idx = np.arange(len(bt), dtype=float)
     ons = np.array([float(n["onset"]) for n in notes])
     vel = np.array([float(n.get("velocity") or 64) for n in notes])
     ks = np.interp(ons, bt, ks_idx)
-    best_p, best_s, best_mask = 0, -1.0, None
-    for p in range(bar_pulses):
-        d = np.abs((ks - p) % bar_pulses)
-        d = np.minimum(d, bar_pulses - d)
-        m = d < 0.35
-        s = float((vel * m).sum())
-        if s > best_s:
-            best_s, best_p, best_mask = s, p, m
+
+    # R1.5：全局拍相位偏移校正——必须自证有效：中位 δ 应用后半拍浓度
+    # 变好（中位距降 ≥15%）才采纳。seiza 教训：shuffle/三连感曲目的
+    # 近拍 onset 稀少，中位 δ 是噪声，硬用会把 beat-sync 映射搞差、
+    # 双候选择优翻到 lattice，碎休止反增 80%（385 vs 216）。
+    near = np.abs(ks - np.round(ks)) < 0.35
+    delta = 0.0
+    if int(near.sum()) >= 8:
+        med = float(np.median(ks[near] - np.round(ks[near])))
+        if 0.02 < abs(med) < 0.45:
+            def _halfbeat_med(k_arr: np.ndarray) -> float:
+                x = np.abs((k_arr * pulse_ql) % 0.5)
+                dd = np.minimum(x, 0.5 - x)
+                return float(np.median(dd))
+            base = _halfbeat_med(ks)
+            fixed = _halfbeat_med(ks - med)
+            if fixed <= base * 0.85:
+                delta = med
+                ks = ks - delta
+
+    # R1.1：拍号推断（在小节相位已知前对全部相位投票）
+    meter = _infer_meter(ks, vel, pulse_ql)
+    bar_pulses = meter["bar_pulses"]
+    best_p = meter["bar_phase"]
+    beat_units = _beat_units_for(pulse_ql)
+    compound = meter["tsig"] in ("6/8", "9/8", "12/8")
 
     # 亚脉冲对中已移除（2026-08-27 canon 事故第三弹）：δ 把簇钉在最近格点
     # 上、反而离拍整整 1 格，节拍先验窗口够不着——_prior_snap_units 对
     # 拍附近的簇（≤0.9 格）直接吸收，不再需要格内微调。
     def cont(t: float) -> float:
-        return (float(np.interp(t, bt, ks_idx)) - best_p) * pulse_ql
+        return (float(np.interp(t, bt, ks_idx)) - delta - best_p) * pulse_ql
 
     def ql_map(t: float) -> Fraction:
-        return Fraction(max(_prior_snap_units(cont(t) * 12), 0), 12)
+        k = _prior_snap_units(cont(t) * 12, compound)
+        k = _attract_units(k, beat_units)
+        return Fraction(max(k, 0), 12)
 
     def resid_map(t: float) -> Fraction:
         v = cont(t) * 12
-        return Fraction(round(abs(v - _prior_snap_units(v)) * 2**20),
+        return Fraction(round(abs(v - _prior_snap_units(v, compound)) * 2**20),
                         2**20)
 
+    meta = {"pulse_ql": pulse_ql, "bar_phase_pulses": best_p,
+            "n_beats": int(len(bt)), "beat_phase_delta": round(delta, 4),
+            "meter": meter}
     return {"ql_map": ql_map, "resid_map": resid_map, "cont": cont,
-            "meta": {"pulse_ql": pulse_ql, "bar_phase_pulses": best_p,
-                     "n_beats": int(len(bt))}}
+            "meta": meta}
 
 
 def _nearest_duration(dur: Fraction) -> Fraction:
@@ -657,6 +801,15 @@ def _reassign_durations(events: list[dict], bpm: float,
             onsets = voice_nexts[ev["voice"]]
             i = bisect.bisect_right(onsets, ev["_onset_ql"])
             voice_gap = (onsets[i] - ev["_onset_ql"]) if i < len(onsets) else None
+            # 填充终点（同音高下一头或声部 gap 截断处）在三连位 → 放开
+            # 三连值：语境词表只看同音高下一头（可能在远处二分位），但
+            # 实际填充分界是 voice_gap 落在三连位（如 1/3）——禁三连值
+            # 会把间隙拆成 1/4+1/12 碎尾片（gurenge 逆天连音，2026-08-29）
+            for _end in (next_ql,
+                         ev["_onset_ql"] + voice_gap if voice_gap else None):
+                if _end is not None and (_end * 4).denominator != 1:
+                    vocab = ALL_DURS
+                    break
             if nxt is not None:
                 gap_ql = nxt["_onset_ql"] - ev["_onset_ql"]
                 if gap_ql <= 0:
@@ -671,8 +824,20 @@ def _reassign_durations(events: list[dict], bpm: float,
                             if x is not None) if (gap_ql or voice_gap) else SUSTAIN_CAP
                 if nxt is None and voice_gap is None:  # 声部末音：不越小节线
                     bound = min(SUSTAIN_CAP, room_bar)
-                ev["_frags_ql"] = _choose_fragments(ev["_onset_ql"], bound,
-                                                    ql_per_measure, vocab)
+                # R1.6 乐句尾填充（canon m2/m4 案例驱动）：raw 实测持续明显
+                # 超过"下一音头截断"（延音踏板/长音压过后音头）时，允许越
+                # 线延长到 2×截断（封顶 SUSTAIN_CAP）——否则转写 offset 到
+                # 小节线、written 却被截成单值，尾巴变成四分休止（听感怪）。
+                # 重切链不比原链长则回退（下取整反缩）。
+                base_chain = _choose_fragments(ev["_onset_ql"], bound,
+                                               ql_per_measure, vocab)
+                if raw_ql >= bound * Fraction(7, 4):
+                    ext = _choose_fragments(
+                        ev["_onset_ql"], min(bound * 2, SUSTAIN_CAP),
+                        ql_per_measure, vocab)
+                    if sum(ext, Fraction(0)) > sum(base_chain, Fraction(0)):
+                        base_chain = ext
+                ev["_frags_ql"] = base_chain
             else:
                 stats["detached" if ratio < DETACHED_RATIO else "middle"] += 1
                 # 休止符削减（v3→v4，2026-08-29 第二阶段 #1）：middle 态
@@ -687,14 +852,139 @@ def _reassign_durations(events: list[dict], bpm: float,
                     ev["_frags_ql"] = _choose_fragments(
                         ev["_onset_ql"], bound, ql_per_measure, vocab)
                 else:
-                    ev["_frags_ql"] = [_largest_unit(min(raw_ql, room_bar),
-                                                     vocab)]
+                    # 单值缩短 + 休止（乐句级沉默在谱面上应可见）；
+                    # R1.6 附：raw ≥7/4 拍的音（canon m2/m4 尾音 raw 1.97Q
+                    # 写 1.0 留四分休止案例）按 raw+1/4 下取整补到整拍——
+                    # 真顿奏（raw 短）不受影响
+                    r = min(raw_ql, room_bar)
+                    if raw_ql >= Fraction(7, 4):
+                        r = max(r, _floor_duration(
+                            min(raw_ql + Fraction(1, 4), room_bar), vocab))
+                    ev["_frags_ql"] = [_largest_unit(r, vocab)]
     return stats
+
+
+def _repair_fragments(events: list[dict], ql_map, ql_pm: Fraction) -> dict:
+    """谱面合理性修复 R2/R3（第三阶段 #1/#5，canon m5/m9/m19 案例驱动）。
+
+    在 _frags_ql（分解前）阶段操作，音头一律不动（铁律），只改 written：
+    - R2 碎休止吸收：同声部相邻事件间隙 ≤1/6 拍且前音原始 offset 覆盖
+      该间隙（钢琴延音），延长前音——三连32分（1/12）碎休止消除；
+    - R3 碎片 tie 修复：两片链总时值非合法单值时，若 raw 够长（≥目标−
+      1/4）晋升到最近合法单值（3/4+1/12=5/6 → 1，m9 案例）；等值两片
+      （8+8、16+16）在不穿半小节线时合并单值（m19 案例，常规记谱合并）。
+    返回计数。"""
+    from collections import Counter
+    stats = Counter()
+
+    # 同音高下一音头（_refit 语境词表用——next=None 会按"当前二分位"
+    # 给纯二分词表，1/3 拍填不进单片只能拆 1/4+1/12 碎尾，gurenge
+    # distorted_guitar "逆天连音"的来源，2026-08-29）
+    by_pv: dict[tuple[int, int], list[Fraction]] = defaultdict(list)
+    for ev in events:
+        by_pv[(ev["pitch"], ev["voice"])].append(ev["_onset_ql"])
+    pv_sorted = {k: sorted(v) for k, v in by_pv.items()}
+
+    def _refit(ev, target: Fraction) -> bool:
+        """R2/R3 改动后重切片段：走 _choose_fragments 保证"片不越小节线
+        ∧ 片时值合法"的不变量（直接 +=gap / 换 [d] 会造出跨线单片，
+        导出即小节跨度溢出，canon 12 处事故）。下取整可能比原片段还短
+        （seiza/yumetoiro 碎休止反增的根因）——不比原来长就不采纳。"""
+        import bisect as _bi
+        onsets = pv_sorted[(ev["pitch"], ev["voice"])]
+        i = _bi.bisect_right(onsets, ev["_onset_ql"])
+        nxt = onsets[i] if i < len(onsets) else None
+        chain = _choose_fragments(
+            ev["_onset_ql"], target, ql_pm,
+            _context_vocab(ev["_onset_ql"], nxt))
+        if sum(chain, Fraction(0)) <= sum(ev["_frags_ql"], Fraction(0)):
+            return False
+        ev["_frags_ql"] = chain
+        return True
+
+    # R2：声部级间隙吸收（不同音高也算——延音踏板下前音持续压过后音头）
+    by_voice: dict[int, list[dict]] = defaultdict(list)
+    for ev in events:
+        by_voice[ev["voice"]].append(ev)
+    for evs in by_voice.values():
+        evs.sort(key=lambda e: e["_onset_ql"])
+        for a, b in zip(evs, evs[1:]):
+            a_end = a["_onset_ql"] + sum(a["_frags_ql"], Fraction(0))
+            gap = b["_onset_ql"] - a_end
+            raw_end = ql_map(a["offset_sec"])
+            if (0 < gap <= Fraction(1, 6)
+                    and raw_end >= b["_onset_ql"] - Fraction(1, 24)):
+                if _refit(a, a_end + gap - a["_onset_ql"]):
+                    stats["R2_absorb"] += 1
+
+    legal = sorted(set(ALL_DURS))
+    for ev in events:
+        fr = ev["_frags_ql"]
+        raw = ql_map(ev["offset_sec"]) - ev["_onset_ql"]
+        if len(fr) == 2:
+            total = fr[0] + fr[1]
+            half_off = ev["_onset_ql"] % ql_pm
+            bar_half = ql_pm / 2
+            if fr[0] == fr[1] and total in legal:
+                # 等值两片：合并（不穿半小节线；穿线的切分是记谱惯例保留）
+                if not (half_off < bar_half < half_off + total):
+                    if _refit(ev, total):
+                        stats["R3_equal_merge"] += 1
+                    continue
+            if total not in legal:
+                # 碎片链晋升：最小合法单值 > total 且 raw 覆盖到目标−1/4
+                for d in legal:
+                    if d > total and raw >= d - Fraction(1, 4):
+                        if _refit(ev, d):
+                            stats["R3_promote"] += 1
+                        break
+    return dict(stats)
+
+
+def _attract_onset_events(events: list[dict], beat_units: int) -> int:
+    """量化后 onset 吸附补通道（R1.4，2026-08-29 canon m9/10 连音反馈）。
+
+    ql_map 级吸附窗 0.9 格（再宽会把参考谱拍前后 32 分对撞同槽丢音）；
+    本通道在事件层只吸**距拍点恰好 1 格**（k=11/13 的"拍−1/12"病理位，
+    canon 11/12 位的 1+1/12 tie）的 onset，且目标位 ±1.5 格内没有同
+    （音高,声部）邻居才吸。首版窗口误写 14 格（≈1.17 拍）曾致 roundtrip
+    丢 62 音——窗口必须只覆盖病理位，2 格以外是真三连 16 分不许动。"""
+    from collections import defaultdict as _dd
+    by_pv: dict[tuple, list] = _dd(list)
+    for e in events:
+        by_pv[(e["pitch"], e["voice"])].append(e["_onset_ql"])
+    for v in by_pv.values():
+        v.sort()
+    moved = 0
+    for e in events:
+        k12 = e["_onset_ql"] * 12
+        if k12.denominator != 1:
+            continue
+        ki = int(k12)
+        q, r = divmod(ki, beat_units)
+        targets = []
+        if r:
+            targets = [q * beat_units, (q + 1) * beat_units]
+        for tgt in targets:
+            if abs(ki - tgt) != 1:   # 只吸"拍±1 格"病理位
+                continue
+            t_ql = Fraction(tgt, 12)
+            if any(abs(x - t_ql) < Fraction(3, 2) and x != e["_onset_ql"]
+                   for x in by_pv[(e["pitch"], e["voice"])]):
+                continue
+            e["_onset_ql"] = t_ql
+            moved += 1
+            break
+    if moved:
+        events.sort(key=lambda e: (e["_onset_ql"], e["pitch"]))
+    return moved
 
 
 def build_track_events(cls: str, notes: list[dict], raw_onsets: dict[int, float],
                        bpm: float,
-                       ql_map=None, resid_map=None) -> list[dict]:
+                       ql_map=None, resid_map=None,
+                       ql_per_measure: Fraction = Fraction(4),
+                       beat_units: int = 12) -> list[dict]:
     """量化后的音笔记谱事件（含 tie 片段与弦品）。
 
     管线：格点映射吸附（v3.1 = 全局精修+rubato 分段跟踪）→ 同时性聚类 →
@@ -728,6 +1018,7 @@ def build_track_events(cls: str, notes: list[dict], raw_onsets: dict[int, float]
             "fret": n.get("fret"),
         })
     events.sort(key=lambda e: (e["_onset_ql"], e["pitch"]))
+    attracted = _attract_onset_events(events, beat_units)
 
     clustered = _cluster_simultaneity(events)
     guard = _post_snap_guard(events)
@@ -740,15 +1031,18 @@ def build_track_events(cls: str, notes: list[dict], raw_onsets: dict[int, float]
         seams = _merge_quantized_seams(events)
     from src.rhythm_prior import apply_rhythm_prior  # T2 节奏模板对撞（默认关）
     prior_bars = apply_rhythm_prior(events)
-    durations = _reassign_durations(events, bpm)
-    logger.info("  [notation] %s simplify: cluster=%d guard=%s seam=%d prior=%d dur=%s",
-                cls, clustered, guard, seams, prior_bars, durations)
+    durations = _reassign_durations(events, bpm, ql_per_measure)
+    repairs = _repair_fragments(events, ql_map, ql_per_measure)
+    logger.info("  [notation] %s simplify: cluster=%d guard=%s seam=%d prior=%d dur=%s repair=%s",
+                cls, clustered, guard, seams, prior_bars, durations, dict(repairs))
 
     for ev in events:
-        frags = _decompose(ev["_onset_ql"], ev.pop("_frags_ql"))
+        frags = _decompose(ev["_onset_ql"], ev.pop("_frags_ql"),
+                           ql_per_measure)
         roles = _tie_roles(len(frags))
-        ev["bar"] = int(ev["_onset_ql"] // 4)
-        ev["beat_in_bar"] = float(ev["_onset_ql"] - Fraction(ev["bar"]) * 4)
+        ev["bar"] = int(ev["_onset_ql"] // ql_per_measure)
+        ev["beat_in_bar"] = float(
+            ev["_onset_ql"] - Fraction(ev["bar"]) * ql_per_measure)
         ev["frags"] = [
             {"bar": mi, "offset": float(off), "dur": str(d), "tie": role}
             for (mi, off, d), role in zip(frags, roles)
@@ -988,30 +1282,37 @@ def _legal_rest_chain(gap: Fraction, vocab: list[Fraction] | None) -> list[Fract
 
 
 def _fill_rests(items: list[dict], ql_per_measure: Fraction,
-                vocab: list[Fraction] | None = None) -> list[tuple[Fraction, object]]:
+                vocab: list[Fraction] | None = None,
+                hide_rests: bool = False) -> list[tuple[Fraction, object]]:
     """items = [{offset, dur, obj(NotRest)}] → 补休止符的 (offset, obj) 列表。
 
     量化模式 vocab=REST_VOCAB（干净词表）；忠实模式 None → _legalize 链。
     所有休止片段保证为合法单值（非法值会让 MuseScore 小节算术崩坏）。
+    hide_rests：溢出 lane（li≥1）的休止隐藏（print-object="no"）——制谱
+    惯例次级声部不显式铺休止链；R1.6/R2 延长音跨小节开 lane 后每 lane
+    各补一套休止曾让 canon 休止 105→574 爆炸（2026-08-29）。
     """
+    def _mk_rest(piece: Fraction):
+        r = m21note.Rest()
+        r.duration.quarterLength = piece
+        if hide_rests:
+            r.style.hideObjectOnPrint = True
+        return r
+
     out = []
     cursor = Fraction(0)
     for it in sorted(items, key=lambda x: x["offset"]):
         if it["offset"] > cursor:
             off = cursor
             for piece in _legal_rest_chain(it["offset"] - cursor, vocab):
-                r = m21note.Rest()
-                r.duration.quarterLength = piece
-                out.append((off, r))
+                out.append((off, _mk_rest(piece)))
                 off += piece
         out.append((it["offset"], it["obj"]))
         cursor = it["offset"] + it["dur"]
     if cursor < ql_per_measure:
         off = cursor
         for piece in _legal_rest_chain(ql_per_measure - cursor, vocab):
-            r = m21note.Rest()
-            r.duration.quarterLength = piece
-            out.append((off, r))
+            out.append((off, _mk_rest(piece)))
             off += piece
     return out
 
@@ -1151,7 +1452,8 @@ def assemble_solo_score(cls: str, events: list[dict], bpm: float,
                 placed = _legalize_placed(placed)
                 _absorb_tiny_gaps(placed, ql_per_measure)
                 for off, obj in _fill_rests(placed, ql_per_measure,
-                                            REST_VOCAB if clean_rests else None):
+                                            REST_VOCAB if clean_rests else None,
+                                            hide_rests=(li > 0)):
                     voice.insert(off, obj)
                 m.insert(0, voice)
             part.append(m)
@@ -1185,6 +1487,8 @@ def assemble_solo_score(cls: str, events: list[dict], bpm: float,
     m0 = parts[0].getElementsByClass(stream.Measure)[0]
     ks_parts = key_signature.strip().split()
     tonic, mode = ks_parts[0], ks_parts[1] if len(ks_parts) > 1 else "major"
+    if len(tonic) > 1 and tonic.endswith("b"):
+        tonic = tonic[:-1] + "-"   # "Bb" → music21 的 "B-"
     m0.insert(0, m21tempo.MetronomeMark(number=int(round(bpm))))
     m0.insert(0, m21key.Key(tonic, mode))
     m0.insert(0, m21meter.TimeSignature(time_signature))
@@ -1368,6 +1672,49 @@ def _build_tab_part_xml(events: list[dict], transposition: int,
     return part
 
 
+def _strip_redundant_naturals(root) -> int:
+    """删除冗余还原记号（2026-08-29 用户"满屏还原号"反馈）。
+
+    music21 makeNotation=False 导出会给**每个**白键音写
+    <accidental>natural</accidental>（最小复现证实）——OSMD 忠实渲染成
+    满屏还原号。乐理上还原号只在"取消"时需要：本小节内该音级此前有
+    非零 alter（含调号升/降）才保留。按 (part, measure, voice) 维护
+    音级状态，返回删除数。"""
+    removed = 0
+    for part in root.findall("part"):
+        # 调号音级（首个 fifths）
+        key_alter = {}
+        for f in part.iter("fifths"):
+            fifths = int(f.text or 0)
+            order = "FCGDAEB"
+            for i in range(abs(fifths)):
+                step = order[i] if fifths > 0 else "BEADGCF"[i]
+                key_alter[step] = 1 if fifths > 0 else -1
+            break
+        for m in part.findall("measure"):
+            # 声部各自独立记号状态（backup 回卷后同小节不同声部互不取消）
+            states: dict[str, dict[str, int]] = {}
+            cur_voice = "1"
+            for el in m:
+                if el.tag == "backup":
+                    cur_voice = "?"   # 换轨：回到未指定，下一 note 自报
+                elif el.tag == "note":
+                    if el.find("rest") is not None:
+                        continue
+                    v = el.findtext("voice") or "1"
+                    cur_voice = v
+                    st = states.setdefault(v, dict(key_alter))
+                    step = el.findtext("pitch/step")
+                    alter = int(el.findtext("pitch/alter") or 0)
+                    acc = el.find("accidental")
+                    if acc is not None and acc.text == "natural":
+                        if st.get(step, 0) == 0:
+                            el.remove(acc)
+                            removed += 1
+                    st[step] = alter
+    return removed
+
+
 def _write_musicxml_exact(score, path: str) -> None:
     """makeNotation=False 精确导出。
 
@@ -1381,6 +1728,10 @@ def _write_musicxml_exact(score, path: str) -> None:
     score.atSoundingPitch = False
     sx = m21ToXml.ScoreExporter(score, makeNotation=False)
     root = sx.parse()
+    removed = _strip_redundant_naturals(root)
+    if removed:
+        logger.info("  [notation] 剔除冗余还原记号 %d 个（%s）", removed,
+                    os.path.basename(path))
     ET.ElementTree(root).write(path, encoding="UTF-8", xml_declaration=True)
 
 
@@ -1558,7 +1909,7 @@ def _post_export_gate(xml_paths: list[str], loud: bool = True) -> dict:
         if not os.path.exists(p):
             continue
         try:
-            n = count_problems(p)
+            n = count_problems(p, 0)  # beats=0：按文件拍号自动检测（3/4 谱）
             summary["problems"] += n
             summary["detail"][os.path.basename(p)] = n
             if n and loud:
@@ -1585,11 +1936,6 @@ def build_notation(notes_json: dict, output_dir: str, mode: str = "both") -> dic
         return None
     bpm = float(notes_json["bpm"])
     tsig = notes_json.get("time_signature", "4/4")
-    beat_num, beat_den = int(tsig.split("/")[0]), int(tsig.split("/")[1])
-    # 四分音符单位的小节长（v1 仅 4/4 全面支持，bar 计算按 4 拍硬编码）
-    ql_per_measure = Fraction(beat_num * 4, beat_den)
-    if tsig != "4/4":
-        logger.warning("  [notation] time signature %s 非 4/4，小节划分仍按 4 拍处理", tsig)
 
     pooled = [n for t in tracks for n in t["notes"]]
     raw_onsets = {id(n): float(n["onset"]) for n in pooled}
@@ -1601,14 +1947,31 @@ def build_notation(notes_json: dict, output_dir: str, mode: str = "both") -> dic
     # 映射错旋则趋于均匀 0.125；canon 实测纯 onset 拟合在 rubato 抹花下
     # 无浓度可言，音频提拍 std 16ms 扛得住）。
     bpm_detected = bpm
-    lattice = _fit_grid_map(pooled, bpm)
-    cands = []
     beat_times = notes_json.get("beat_times") or []
+    bt_rec = None
     if len(beat_times) >= 16 and notes_json.get("pulse_sec"):
-        bt = _beat_sync_map(pooled, beat_times,
-                            float(notes_json["pulse_sec"]), bpm)
-        if bt:
-            cands.append(("beat-sync", bt))
+        bt_rec = _beat_sync_map(pooled, beat_times,
+                                float(notes_json["pulse_sec"]), bpm)
+
+    # R1.1-2：拍号采用拍同步映射的推断（格点拟合胜出时同样适用——拍号
+    # 只关心拍网格，与哪种映射胜出无关）；无拍素材回退 notes.json 标签。
+    # 此前全曲库硬编码 4/4（gymnopedie 3/4、radetzky 2/4 全被错切）。
+    meter = (bt_rec or {}).get("meta", {}).get("meter")
+    if meter and meter["tsig"] != tsig:
+        logger.info("  [notation] meter inferred: %s (enrich=%s, was %s)",
+                    meter["tsig"], meter.get("enrich"), tsig)
+        tsig = meter["tsig"]
+        notes_json["time_signature"] = tsig
+    beat_num, beat_den = int(tsig.split("/")[0]), int(tsig.split("/")[1])
+    ql_per_measure = Fraction(beat_num * 4, beat_den)
+    compound = tsig in ("6/8", "9/8", "12/8")
+    beat_units = 12
+    if bt_rec and bt_rec["meta"].get("pulse_ql"):
+        beat_units = _beat_units_for(float(bt_rec["meta"]["pulse_ql"]))
+    lattice = _fit_grid_map(pooled, bpm, beat_units, compound)
+    cands = []
+    if bt_rec:
+        cands.append(("beat-sync", bt_rec))
     cands.append(("piecewise-lattice", lattice))
 
     def _halfbeat_score(rec) -> float:
@@ -1646,7 +2009,7 @@ def build_notation(notes_json: dict, output_dir: str, mode: str = "both") -> dic
                     json.dump(_disk, f, ensure_ascii=False, indent=2)
         except Exception:
             logger.warning("  [notation] notes.json bpm 回写失败", exc_info=True)
-    key_sig = estimate_key(pooled)
+    key_sig = _spell_key(estimate_key(pooled))
 
     # T1 和声先验层：和弦跟踪（失败不影响谱面导出）
     harmony_segments: list[dict] | None = None
@@ -1689,7 +2052,8 @@ def build_notation(notes_json: dict, output_dir: str, mode: str = "both") -> dic
             logger.info("  [notation] drums 谱 v1 不含，跳过")
             continue
         events = build_track_events(cls, t["notes"], raw_onsets, bpm,
-                                     ql_map, resid_map)
+                                     ql_map, resid_map, ql_per_measure,
+                                     beat_units)
         if harmony_segments:
             try:
                 from src.harmony_prior import note_role

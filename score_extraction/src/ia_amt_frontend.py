@@ -91,12 +91,15 @@ def _resolve_checkpoint(model_type: str, repo: Path) -> Path:
 def transcribe_ia_amt(audio_path: str, model_type: str = "guitar",
                       device: str | None = None,
                       velocity: int = 100,
-                      note_bias: float = 0.0) -> dict:
+                      note_bias: float = 0.0,
+                      merge_onset_ms: float | None = None) -> dict:
     """转写一个音频文件 → {"notes": [...], "instrument_counts": {...}}。
 
     note 字段与 ByteDance/Riley 前端对齐：onset/offset（秒）、pitch、velocity、
     confidence（恒 1.0，模型不输出逐音置信度）、instrument_class（36 类分类）。
     offset 即 Semi-CRF 区间右端点 + boundary head 亚帧修正，无需后处理。
+    merge_onset_ms：窗口缝合时同音高 onset 合并窗（默认 50ms，None=仓库
+    默认；快速段落黏音实验用，见 eval/canon_stickiness_ab.py）。
     """
     import torch
 
@@ -116,6 +119,8 @@ def transcribe_ia_amt(audio_path: str, model_type: str = "guitar",
             model=model, waveform=waveform, model_config=mcfg, settings=settings,
             device=dev, amp_enabled=False, amp_dtype=None, velocity=velocity,
             disable_tqdm=True,
+            **({} if merge_onset_ms is None
+               else {"merge_onset_ms": float(merge_onset_ms)}),
         )
     sr = int(mcfg.sample_rate)
     out = []
