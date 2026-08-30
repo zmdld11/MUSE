@@ -229,6 +229,8 @@ def run_multi_instrument(audio_path: str, output_dir: str, bpm: float,
     # 修正 = 下版本已知项（本层不动 SOME 原始输出）。
     vocal_notes: list[dict] | None = None
     vocal_backbone = ""
+    vocal_lyrics: dict | None = None  # 歌词增强层（chars+lines，无 LRC 恒 None）
+    vocal_audit: dict = {}
     if config.MULTI_SEPARATION == "versep_guitar":
         from src.source_separate import separate_vocals_melband
         if on_stage:
@@ -250,10 +252,98 @@ def run_multi_instrument(audio_path: str, output_dir: str, bpm: float,
             if on_stage:
                 on_stage("transcribe", "人声转写")
             try:
-                r = transcribe_some(vocals_wav)
+                # 歌词增强层（人声专项 v2，2026-08-30）：同名 .lrc 自动发现
+                # （music/vocal 约定=音频旁同名 .lrc）；无 LRC = 现状直通
+                lrc = None
+                lrc_path = os.path.splitext(audio_path)[0] + ".lrc"
+                if os.path.exists(lrc_path):
+                    from src.lyric_align import parse_lrc as _parse_lrc
+                    try:
+                        import librosa as _librosa
+                        dur_audio = float(
+                            _librosa.get_duration(path=audio_path))
+                    except Exception:
+                        dur_audio = None
+                    lrc = _parse_lrc(lrc_path, dur_audio)
+                    if lrc:
+                        logger.info("  [multi] LRC: %s（%d 行歌词）",
+                                    os.path.basename(lrc_path),
+                                    len(lrc["lyric_lines"]))
+                line_starts = ([l["t0"] for l in lrc["lyric_lines"]]
+                               if lrc else None)
+                r = transcribe_some(vocals_wav, line_boundaries=line_starts)
                 if r["note_count"] >= MIN_CLASS_NOTES:
                     vocal_notes = r["notes"]
                     vocal_backbone = "melband+some"
+                    # offset 能量截断（无歌词依赖，SOME 长音拖尾 p90 +455ms）
+                    from src.lyric_align import (detect_ornaments,
+                                                 trim_vocal_offsets)
+                    vocal_notes, n_trim = trim_vocal_offsets(
+                        vocal_notes, vocals_wav)
+                    vocal_audit["offsets_trimmed"] = n_trim
+                    if lrc:
+                        from src.lyric_align import (align_chars,
+                                                     fill_missing_syllables,
+                                                     filter_breath_notes,
+                                                     snap_line_anchors,
+                                                     split_melisma)
+                        # 行锚自校正（VII，2026-08-30）：官方 LRC 也会整张
+                        # 专辑系统性偏移（夏日实测 +331ms/55% 行>300ms）。
+                        # SOME 音符 onset 做参照（音高检测过的真唱，能量
+                        # 法会被漏音/换气骗出假偏移）+ 曲首标题行剔除；
+                        # 必须在 filter_breath_notes/align 之前
+                        import re as _re
+                        _title = _re.sub(
+                            r"^\d+\s+", "",
+                            os.path.splitext(os.path.basename(audio_path))[0]
+                        ).split(" - ")[0].strip()
+                        _off = snap_line_anchors(
+                            lrc, vocals_wav, song_title=_title,
+                            notes=vocal_notes,
+                            offset_enabled=os.environ.get("MUSE_LRC_SNAP") == "1")
+                        if abs(_off) > 1e-3:
+                            vocal_audit["lrc_offset_applied"] = round(_off, 3)
+                            logger.info("  [multi] LRC 行锚自校正 %+.3fs", _off)
+                        lines = lrc["lyric_lines"]
+                        vocal_notes, breath_removed = filter_breath_notes(
+                            vocal_notes, lines, vocals_wav)
+                        chars = align_chars(lrc, vocals_wav, vocal_notes)
+                        # CTC 字界精修（P3，2026-08-30）：逐行 wav2vec2
+                        # Viterbi（行间 LRC 锚死防副歌滑移；权重缺失/
+                        # OOV 回退 energy）——一致性中位 0.13→0.06s
+                        from src.lyric_align import refine_chars_ctc
+                        chars, n_ref = refine_chars_ctc(
+                            chars, lines, vocals_wav)
+                        if n_ref:
+                            vocal_audit["chars_ctc_refined"] = n_ref
+                        # 一字一音先验（P1）：拖腔拆音 → 补漏（帧 F0 合成）
+                        vocal_notes, n_split = split_melisma(
+                            vocal_notes, chars, vocals_wav)
+                        vocal_notes, n_filled = fill_missing_syllables(
+                            vocal_notes, chars, vocals_wav)
+                        vocal_lyrics = {
+                            "chars": chars,
+                            "lines": [{"t0": l["t0"], "t1": l["t1"],
+                                       "text": l["text"]} for l in lines],
+                            "source_file": lrc_path,
+                        }
+                        vocal_audit.update({
+                            "lyric_source": os.path.basename(lrc_path),
+                            "breath_removed": len(breath_removed),
+                            "melisma_split": n_split,
+                            "syllables_filled": n_filled,
+                        })
+                        logger.info(
+                            "  [multi] 歌词增强层：offset截断 %d，呼吸删 %d，"
+                            "拖腔拆 %d，补漏插 %d 字位",
+                            n_trim, len(breath_removed), n_split, n_filled)
+                    # 技巧标注（颤音/滑音；帧 F0 形态，与歌词无关）
+                    vocal_notes = detect_ornaments(vocal_notes, vocals_wav)
+                    n_vib = sum(1 for n in vocal_notes
+                                if n.get("ornament") == "vibrato")
+                    vocal_audit["vibrato_marked"] = n_vib
+                    if n_vib:
+                        logger.info("  [multi] 技巧标注：vibrato %d", n_vib)
             except Exception:
                 logger.warning("  [multi] SOME 人声转写失败，回退 raw 直推",
                                exc_info=True)
@@ -345,8 +435,10 @@ def run_multi_instrument(audio_path: str, output_dir: str, bpm: float,
         "time_signature": config.DEFAULT_TIME_SIG,
         "duration": round(float(duration), 3),
         **beat_info,
+        **({"lyrics": vocal_lyrics} if vocal_lyrics else {}),
         "source": {"audio": audio_path, "frontend": "ia_amt:default",
                    "separated": separated,
+                   **({"vocal_lyric_audit": vocal_audit} if vocal_audit else {}),
                    **({"separators": {
                           "guitar": "VERSEP2.0+bs4",
                           "vocals": vocal_backbone or "raw-direct",

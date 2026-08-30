@@ -40,12 +40,40 @@ export interface Project {
   notation?: NotationMeta; // 记谱层产物（管线 notation/ 目录存在时）
 }
 
+/** 简谱/歌词谱用：量化事件的谱面片段（notation.json tracks[].events[].frags） */
+export interface NotationFrag {
+  bar: number;
+  offset: number; // 小节内位置（四分音符单位）
+  dur: string; // 时值（Fraction 字符串，四分音符单位）
+  tie: string | null; // "start" | "continue" | "stop" | null
+}
+
+/** 量化事件（人声轨保留全量，供歌词谱/简谱渲染） */
+export interface NotationEvent {
+  pitch: number;
+  onset_sec: number;
+  offset_sec: number;
+  bar: number;
+  frags: NotationFrag[];
+  tie?: string | null;
+  lyric?: string; // 歌词字（多字一音时拼接；无 LRC 时缺省）
+  ornament?: string | null; // "vibrato" | "glissando_up" | "glissando_down" | null
+  voice?: number;
+}
+
 /** 记谱轨道元信息（notation.json 摘要，谱面文件按约定路径拼） */
 export interface NotationTrackMeta {
   instrumentClass: string;
   minBar: number; // 单乐器谱裁剪起始小节（量化域绝对小节号）
   firstOnsetSec: number; // 首音原始时间（忠实域起始小节推算用）
   noteCount: number;
+  events?: NotationEvent[]; // 人声轨保留全量（歌词谱/简谱用）
+}
+
+/** 歌词增强层（人声专项 v2）：lines 供简谱按歌词行断行 */
+export interface NotationLyrics {
+  lines: { t0: number; t1: number; text: string }[];
+  source_file?: string;
 }
 
 export interface NotationMeta {
@@ -66,6 +94,8 @@ export interface NotationMeta {
     chord_labels_by_category?: Record<string, Record<string, number>>;
   } & Record<string, unknown>; // T4 乐曲分析
   tracks: NotationTrackMeta[];
+  lyrics?: NotationLyrics; // 歌词增强层（无 LRC 时缺省 = 纯旋律谱）
+  timeSignature?: string; // "4/4"（简谱拍号头）
   /** 真实时间→谱面 QL 分段线性表（rubato 曲目光标同步；缺省回退名义 bpm） */
   timeMap?: [number, number][];
 }

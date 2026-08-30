@@ -38,6 +38,26 @@ def detect_bpm(audio: str):
     return bpm
 
 
+def _write_browser_audio(src: Path, dst: Path) -> None:
+    """demo/试用装音频副本走 soundfile 重编码为干净 PCM_16 FLAC。
+
+    根因（2026-08-30 浏览器实测）：部分源 flac（夏日/小丑，元数据含大
+    PICTURE 块等）Chrome decodeAudioData 直接抛 "Unable to decode audio
+    data"——44.1k/16bit 与能解的 canon 完全同规格，位深/采样率无关。
+    重编码产出规范布局文件（实测可解）；源文件永不改动。非 flac 原样拷贝。
+    """
+    if src.suffix.lower() != ".flac":
+        shutil.copyfile(src, dst)
+        return
+    try:
+        import soundfile as sf
+        y, sr = sf.read(str(src), dtype="float32", always_2d=True)
+        sf.write(str(dst), y, sr, subtype="PCM_16", format="FLAC")
+    except Exception as e:  # noqa: BLE001
+        print(f"[run_one] !! 音频重编码失败（{e}），回退原样拷贝")
+        shutil.copyfile(src, dst)
+
+
 def assemble_demo(out_dir: Path, audio: str, bpm: float) -> None:
     """组装前端 demo 包：index.json 指向 score_mid（谱面同源），info.json，音频副本。"""
     notation_p = out_dir / "notation" / "notation.json"
@@ -70,7 +90,7 @@ def assemble_demo(out_dir: Path, audio: str, bpm: float) -> None:
                    ensure_ascii=False, indent=1), encoding="utf-8")
     audio_dst = out_dir / Path(audio).name
     if not audio_dst.exists():
-        shutil.copyfile(audio, audio_dst)
+        _write_browser_audio(Path(audio), audio_dst)
     print(f"[run_one] demo 包组装完成：{len(mids)} 条 score_mid 轨 + index/info")
 
 
@@ -106,7 +126,7 @@ def sync_to_frontend(out_dirs: list[Path]) -> None:
             shutil.copyfile(f, dst / f.name)
         audio = idx.get("audio")
         if audio and (out_dir / audio).exists():
-            shutil.copyfile(out_dir / audio, dst / audio)
+            _write_browser_audio(out_dir / audio, dst / audio)
         songs.append({"id": sid, "name": idx.get("name", sid), "dir": sid,
                       "audio": audio, "mids": idx.get("mids", []),
                       "raw_mids": idx.get("raw_mids", [])})

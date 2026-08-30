@@ -40,7 +40,7 @@ export function PlayerPage() {
         type="file"
         multiple
         hidden
-        accept=".flac,.wav,.mp3,.ogg,.m4a,.aac,.mid,.json"
+        accept=".flac,.wav,.mp3,.ogg,.m4a,.aac,.mid,.json,.lrc"
         onChange={(e) => {
           const files = Array.from(e.target.files ?? []);
           if (files.length > 0) handlePickedFiles(files);
@@ -83,7 +83,7 @@ function EmptyState({
           <p className="mt-1 text-xs leading-relaxed text-content-2">
             选择管线输出目录（含 .mid 与音频）或音频文件夹
             <br />
-            拖拽打开将在 M3 支持
+            选音频时可同选同名 .lrc（人声出歌词五线谱/简谱）
           </p>
         </div>
         <div className="flex items-center gap-2">

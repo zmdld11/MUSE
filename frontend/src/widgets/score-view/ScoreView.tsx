@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { FileMusic, Loader2, Mic } from "lucide-react";
+import { FileMusic, Loader2 } from "lucide-react";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { usePlayerStore } from "@/entities/project/store";
 import type { NotationMeta } from "@/entities/project/types";
@@ -7,13 +7,12 @@ import { activeEngine } from "@/features/playback/control";
 import { tauriReadBytes } from "@/features/library/fileAccess";
 import { familyFromInstrumentClass } from "@/features/library/loadProject";
 import { familyColor } from "@/shared/theme/instrumentColors";
+import { Segmented } from "@/shared/ui/controls";
 import { cn } from "@/shared/utils/cn";
+import { JianpuView } from "./JianpuView";
 
-/** 人声类（melody/vocal_harmony/choir）暂不出五线谱：人声专用谱
- *  （歌词对照）规划在下一阶段，本阶段先隐藏（2026-08-29 #4） */
-function isVocalClass(cls: string): boolean {
-  return familyFromInstrumentClass(cls) === "vocal";
-}
+/** 谱面版本（人声轨专属切换；2026-08-30 人声专项 v2：歌词双谱） */
+type ScoreVersion = "staff" | "jianpu";
 
 /**
  * 乐谱视图（M4）：OSMD 渲染管线 notation/ 产物。
@@ -24,6 +23,8 @@ function isVocalClass(cls: string): boolean {
 export function ScoreView() {
   const project = usePlayerStore((s) => s.project);
   const midiSource = usePlayerStore((s) => s.midiSource);
+  const scoreTrack = usePlayerStore((s) => s.scoreTrack);
+  const [scoreVersion, setScoreVersion] = useState<ScoreVersion>("staff");
   const notation = project?.notation;
   if (!notation || notation.tracks.length === 0) return <EmptyScore />;
   if (midiSource === "raw") {
@@ -46,11 +47,32 @@ export function ScoreView() {
     );
   }
 
+  const active = scoreTrack ?? notation.tracks[0].instrumentClass;
+  const activeTrack = notation.tracks.find(
+    (t) => t.instrumentClass === active,
+  );
+  const activeIsVocal =
+    activeTrack != null &&
+    familyFromInstrumentClass(activeTrack.instrumentClass) === "vocal";
+
   return (
     <div className="flex h-full flex-col">
-      <ScoreToolbar notation={notation} />
+      <ScoreToolbar
+        notation={notation}
+        active={active}
+        version={scoreVersion}
+        onVersionChange={setScoreVersion}
+      />
       <div className="min-h-0 flex-1 overflow-auto px-6 pb-8 pt-4">
-        <ScoreCanvas notation={notation} />
+        {activeIsVocal && scoreVersion === "jianpu" && activeTrack ? (
+          <JianpuView
+            notation={notation}
+            track={activeTrack}
+            bpm={project?.bpm}
+          />
+        ) : (
+          <ScoreCanvas notation={notation} active={active} />
+        )}
       </div>
     </div>
   );
@@ -74,26 +96,27 @@ function EmptyScore() {
   );
 }
 
-function ScoreToolbar({ notation }: { notation: NotationMeta }) {
+function ScoreToolbar({
+  notation,
+  active,
+  version,
+  onVersionChange,
+}: {
+  notation: NotationMeta;
+  active: string;
+  version: ScoreVersion;
+  onVersionChange: (v: ScoreVersion) => void;
+}) {
   const project = usePlayerStore((s) => s.project);
   const theme = usePlayerStore((s) => s.theme);
-  const scoreTrack = usePlayerStore((s) => s.scoreTrack);
   const setScoreTrack = usePlayerStore((s) => s.setScoreTrack);
-
-  // 人声类不出页签；默认选中首个非人声轨（scoreTrack 由乐器面板点人声轨
-  // 置位时，谱面区显示占位卡片）
-  const scoreTracks = notation.tracks.filter(
-    (t) => !isVocalClass(t.instrumentClass),
-  );
-  const active =
-    scoreTrack ??
-    scoreTracks[0]?.instrumentClass ??
-    notation.tracks[0].instrumentClass;
+  const activeIsVocal =
+    familyFromInstrumentClass(active) === "vocal";
 
   return (
     <div className="flex flex-wrap items-center gap-2 border-b border-stroke px-6 py-2.5">
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
-        {scoreTracks.map((t) => {
+        {notation.tracks.map((t) => {
           const mt = project?.tracks.find((tr) =>
             tr.id.startsWith(`${t.instrumentClass}.mid:`),
           );
@@ -121,6 +144,16 @@ function ScoreToolbar({ notation }: { notation: NotationMeta }) {
           );
         })}
       </div>
+      {activeIsVocal ? (
+        <Segmented<ScoreVersion>
+          options={[
+            { value: "staff", label: "五线谱" },
+            { value: "jianpu", label: "简谱" },
+          ]}
+          value={version}
+          onChange={onVersionChange}
+        />
+      ) : null}
       <ChordStatsBadge analysis={notation.analysis} />
       {notation.key ? (
         <span className="tnum shrink-0 text-[11px] text-content-3">
@@ -200,16 +233,14 @@ function ChordStatsBadge({
   );
 }
 
-function ScoreCanvas({ notation }: { notation: NotationMeta }) {
+function ScoreCanvas({
+  notation,
+  active,
+}: {
+  notation: NotationMeta;
+  active: string;
+}) {
   const project = usePlayerStore((s) => s.project);
-  const scoreTrack = usePlayerStore((s) => s.scoreTrack);
-  const nonVocal = notation.tracks.find(
-    (t) => !isVocalClass(t.instrumentClass),
-  );
-  const active =
-    scoreTrack ??
-    nonVocal?.instrumentClass ??
-    notation.tracks[0].instrumentClass;
   const trackMeta = useMemo(
     () => notation.tracks.find((t) => t.instrumentClass === active),
     [notation, active],
@@ -348,16 +379,20 @@ function ScoreCanvas({ notation }: { notation: NotationMeta }) {
           let yTop = Infinity;
           let yBot = -Infinity;
           const entries: { ql: number; x: number }[] = [];
-          for (const gm of ml[i] ?? []) {
-            const bb = gm.PositionAndShape;
-            const left = bb.absolutePosition.x - bb.size.width / 2;
-            x = Math.min(x, left);
-            w = Math.max(w, bb.size.width);
-            yTop = Math.min(yTop, bb.absolutePosition.y - bb.size.height / 2);
-            yBot = Math.max(yBot, bb.absolutePosition.y + bb.size.height / 2);
-            for (const se of gm.staffEntries ?? []) {
-              const ts = se.getAbsoluteTimestamp?.();
-              if (!ts) continue;
+        for (const gm of ml[i] ?? []) {
+          // 新歌吉他谱实测 OSMD MeasureList 行内可含 undefined 条目
+          // （谱表缺失行），不 guard 会炸整段渲染（2026-08-30 夏日案例）
+          if (!gm?.PositionAndShape) continue;
+          const bb = gm.PositionAndShape;
+          const left = bb.absolutePosition.x - bb.size.width / 2;
+          x = Math.min(x, left);
+          w = Math.max(w, bb.size.width);
+          yTop = Math.min(yTop, bb.absolutePosition.y - bb.size.height / 2);
+          yBot = Math.max(yBot, bb.absolutePosition.y + bb.size.height / 2);
+          for (const se of gm.staffEntries ?? []) {
+            if (!se?.PositionAndShape) continue;
+            const ts = se.getAbsoluteTimestamp?.();
+            if (!ts) continue;
               // OSMD 时间戳单位=全音符（MusicXML n/(4·divisions) 约定），
               // timeMap/QL 是四分音符单位 → ×4 换算（08-28 用户报"歌放到
               // 1/4 光标就到谱尾"= 4× 速率错位的根因）
@@ -509,15 +544,6 @@ function ScoreCanvas({ notation }: { notation: NotationMeta }) {
     return () => cancelAnimationFrame(raf);
   }, [renderToken, notation, trackMeta, project?.bpm]);
 
-  // 人声轨：不出谱（占位卡片；containerRef 不渲染 → 渲染 effect 自然跳过）
-  if (isVocalClass(active)) {
-    return (
-      <div className="relative mx-auto max-w-[1140px]">
-        <VocalScorePlaceholder />
-      </div>
-    );
-  }
-
   return (
     <div className="relative mx-auto max-w-[1140px]">
       {(busy || error) && (
@@ -536,25 +562,6 @@ function ScoreCanvas({ notation }: { notation: NotationMeta }) {
       {/* 谱面用纸张底色（乐谱惯例），不随主题反色 */}
       <div className="overflow-hidden rounded-xl bg-[#fffdf8] shadow-lg ring-1 ring-black/5">
         <div ref={containerRef} className="min-h-[420px] px-5 py-3" />
-      </div>
-    </div>
-  );
-}
-
-/** 人声谱占位：人声将有带歌词对照的专用谱面（下一阶段），旋律先看卷帘 */
-function VocalScorePlaceholder() {
-  return (
-    <div className="flex min-h-[420px] items-center justify-center p-8">
-      <div className="flex max-w-md flex-col items-center gap-4 rounded-2xl border border-stroke bg-surface-1/60 px-10 py-10 text-center backdrop-blur-xl">
-        <div className="flex h-16 w-16 items-center justify-center rounded-full bg-accent/15">
-          <Mic className="h-8 w-8 text-accent" />
-        </div>
-        <h2 className="text-lg font-medium text-content-1">人声专用谱开发中</h2>
-        <p className="text-sm leading-relaxed text-content-2">
-          人声将有带歌词对照的专用谱面（下一阶段推出）。
-          <br />
-          当前可在下方卷帘查看人声旋律的音高与节奏。
-        </p>
       </div>
     </div>
   );

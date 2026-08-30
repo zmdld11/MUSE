@@ -36,12 +36,18 @@ _INS = None
 _Slicer = None
 
 
-def _merge_vibrato(notes: list[dict]) -> list[dict]:
+def _merge_vibrato(notes: list[dict],
+                   line_boundaries: list[float] | None = None) -> list[dict]:
     """无休止间隔的连续 run 内做碎块合并（音头保护：rest 边界=真实
     换气/起音，绝不跨段；Δ>VIB_NEAR_DP 的音高跳变=真音符，不吞）。
 
+    line_boundaries（歌词行起点，可选）：run 亦不跨行——歌者连唱跨行时
+    SOME 可能输出连续无 rest 的音串，行边界=换气/新乐句的先验，比 rest
+    更保守的切分点（人声专项 v2 B，无 LRC 时退化为基础行为）。
+
     合并块的音高 = 时长加权均值（对称颤音落中心，滑音偏向停留侧）。
     """
+    from bisect import bisect_right
     out: list[dict] = []
     run: list[dict] = []
 
@@ -57,9 +63,13 @@ def _merge_vibrato(notes: list[dict]) -> list[dict]:
 
     prev_end = None
     for n in notes:
-        # rest 间隔（时间缝）或跨 run 断裂 → 结束当前 run
+        # rest 间隔（时间缝）、跨 run 断裂或跨歌词行 → 结束当前 run
         if prev_end is not None and n["onset"] - prev_end > 1e-6:
             flush()
+        if run and line_boundaries:
+            bi = bisect_right(line_boundaries, run[0]["onset"] + 1e-6)
+            if bi < len(line_boundaries) and n["onset"] >= line_boundaries[bi]:
+                flush()
         if run:
             gap_dp = abs(n["_midi"] - run[-1]["_midi"])
             short = min(n["offset"] - n["onset"],
@@ -100,12 +110,14 @@ def _load():
     logger.info("[some] loaded ckpt=%s", _CKPT.name)
 
 
-def transcribe_some(audio_path: str) -> dict:
+def transcribe_some(audio_path: str,
+                     line_boundaries: list[float] | None = None) -> dict:
     """wav → {"notes": [...], "note_count": int}（instrument_class 恒 "melody"）。
 
     note 字段与 ia-amt 前端对齐。音高：先按 note 级连续值做颤音/碎块合并
     （_merge_vibrato），合并块取时长加权均值，最后才取整——round 抖动的
     根源是先取整后合并会把 ±1 摆动钉死成两个半音（2026-08-29 #5）。
+    line_boundaries：歌词行起点列表（可选），颤音合并不跨行。
     """
     import librosa
     import numpy as np
@@ -130,7 +142,7 @@ def transcribe_some(audio_path: str) -> dict:
             t = end
     raw.sort(key=lambda n: n["onset"])
     notes = []
-    for n in _merge_vibrato(raw):
+    for n in _merge_vibrato(raw, line_boundaries):
         pitch = int(round(n["_midi"]))
         if VOCAL_PITCH_LO <= pitch <= VOCAL_PITCH_HI:
             notes.append({

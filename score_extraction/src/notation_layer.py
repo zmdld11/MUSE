@@ -31,9 +31,11 @@ from collections import defaultdict
 from fractions import Fraction
 from pathlib import Path
 
-from music21 import (chord as m21chord, clef as m21clef, instrument as m21inst,
-                     interval as m21interval, key as m21key, layout, meter as m21meter,
-                     note as m21note, stream, tempo as m21tempo, tie as m21tie)
+from music21 import (chord as m21chord, clef as m21clef,
+                     expressions as m21expr, instrument as m21inst,
+                     interval as m21interval, key as m21key, layout,
+                     meter as m21meter, note as m21note, stream,
+                     tempo as m21tempo, tie as m21tie)
 
 from src import guitar_tab, voice_assign
 from src.key_estimate import estimate_key
@@ -60,6 +62,8 @@ GUITAR_CLASSES = {"acoustic_guitar", "distorted_guitar", "electric_guitar_clean"
                   "electric_guitar_muted", "guitar_harmonics"}
 KEYBOARD_CLASSES = {"piano", "electric_piano"}
 BASS_CLASSES = {"electric_bass", "acoustic_bass", "slap_bass", "synth_bass"}
+# 人声族（与 multi_instrument.VOICE_CLASSES 同口径）：歌词下挂只发生在这些轨
+VOCAL_CLASSES = {"melody", "vocal_harmony", "choir"}
 
 # 标准时值全集（四分音符单位）；时值选择一律"向下取"（拖尾衰减，宁短勿拖）
 ALL_DURS = sorted({
@@ -625,6 +629,41 @@ def _tie_roles(n: int) -> list[str | None]:
     return ["start"] + ["continue"] * (n - 2) + ["stop"]
 
 
+def _attach_lyrics(events: list[dict], chars: list[dict]) -> int:
+    """字级歌词 → 量化事件（人声谱歌词下挂，人声专项 v2 2026-08-30）。
+
+    候选 = 非 tie 尾事件（连音尾不是新咬字：一字多音挂 tie-start）；
+    归属 = onset_sec ≤ 字起音+0.12 中最近者；字落在该音结束 0.3s 之后
+    （长休止/LRC 漂移）→ 顺延下一候选。多字共事件 → 拼接（快咬字多字
+    一音）。返回挂载字数。
+    """
+    if not chars:
+        return 0
+    cands = [e for e in events if e.get("tie") not in ("stop", "continue")]
+    if not cands:
+        return 0
+    cands.sort(key=lambda e: float(e["onset_sec"]))
+    times = [float(e["onset_sec"]) for e in cands]
+    from bisect import bisect_right
+    attached = 0
+    for ch in chars:
+        t = float(ch["onset"])
+        # 双向最近（±0.35）：CTC 字界贴韵母晚于声母起音 ~0.2s、轻声字又
+        # 可能早于音头——单向容差两头各挂错一边（+0.12/+0.25 两个教训）
+        j = bisect_right(times, t)
+        best, bd = None, 0.36
+        for jj in (j - 1, j):
+            if 0 <= jj < len(cands):
+                d = abs(times[jj] - t)
+                if d < bd:
+                    best, bd = cands[jj], d
+        if best is None:
+            best = cands[0] if t < times[0] else cands[-1]
+        best["lyric"] = (best.get("lyric") or "") + ch["char"]
+        attached += 1
+    return attached
+
+
 def _legalize(dur: Fraction) -> list[Fraction]:
     """贪心分解为合法时值链（和恰等于 dur；dur 需为 1/48 的整数倍）。"""
     out: list[Fraction] = []
@@ -1011,6 +1050,7 @@ def build_track_events(cls: str, notes: list[dict], raw_onsets: dict[int, float]
             "velocity": n.get("velocity", 100),
             "onset_sec": round(raw_onsets[id(n)], 4),
             "offset_sec": round(n["offset"], 4),
+            "ornament": n.get("ornament"),
             "_onset_ql": onset_ql,
             "rubato": bool(residual > SNAP_TOL_QL),
             "quant_confidence": round(max(0.0, 1.0 - float(residual / SNAP_TOL_QL)), 3),
@@ -1342,11 +1382,15 @@ def assemble_solo_score(cls: str, events: list[dict], bpm: float,
 
     frag_items: dict[int, list[dict]] = defaultdict(list)  # voice -> 片段
     for ev in events:
-        for fr in ev["frags"]:
+        for fi, fr in enumerate(ev["frags"]):
             frag_items[ev["voice"]].append({
                 "m": fr["bar"], "offset": Fraction(fr["offset"]).limit_denominator(96),
                 "dur": Fraction(fr["dur"]), "tie": fr["tie"],
                 "pitch": ev["pitch"] + written, "ev": ev,
+                # 歌词只挂事件首片段（连音尾不重复咬字）
+                "lyric": ev.get("lyric") if fi == 0 else None,
+                # 颤音记号只挂首片段（tr 打在音头，装饰属事件级）
+                "ornament": ev.get("ornament") if fi == 0 else None,
             })
 
     all_frags = [it for its in frag_items.values() for it in its]
@@ -1435,6 +1479,8 @@ def assemble_solo_score(cls: str, events: list[dict], bpm: float,
                             n.duration.quarterLength = it["dur"]
                             if it["tie"]:
                                 n.tie = m21tie.Tie(it["tie"])
+                            if it.get("lyric"):
+                                n.addLyric(str(it["lyric"]))
                             ns.append(n)
                         placed.append({"offset": grp_off, "dur": grp[0]["dur"],
                                        "obj": m21chord.Chord(ns)})
@@ -1444,6 +1490,11 @@ def assemble_solo_score(cls: str, events: list[dict], bpm: float,
                         n.duration.quarterLength = it["dur"]
                         if it["tie"]:
                             n.tie = m21tie.Tie(it["tie"])
+                        if it.get("lyric"):
+                            n.addLyric(str(it["lyric"]))
+                        if it.get("ornament") == "vibrato":
+                            # 颤音=主音+tr 记号（专业谱惯例：不写实际摆动）
+                            n.expressions.append(m21expr.Trill())
                         if v == 2:
                             n.stemDirection = "down"
                         placed.append({"offset": grp_off, "dur": it["dur"], "obj": n})
@@ -1936,6 +1987,9 @@ def build_notation(notes_json: dict, output_dir: str, mode: str = "both") -> dic
         return None
     bpm = float(notes_json["bpm"])
     tsig = notes_json.get("time_signature", "4/4")
+    # 歌词增强层（人声专项 v2）：multi_instrument 在 notes_json 挂 lyrics
+    # {chars, lines, source_file}；无 LRC 时为 None → 纯旋律谱
+    lyrics = notes_json.get("lyrics") or None
 
     pooled = [n for t in tracks for n in t["notes"]]
     raw_onsets = {id(n): float(n["onset"]) for n in pooled}
@@ -2054,6 +2108,9 @@ def build_notation(notes_json: dict, output_dir: str, mode: str = "both") -> dic
         events = build_track_events(cls, t["notes"], raw_onsets, bpm,
                                      ql_map, resid_map, ql_per_measure,
                                      beat_units)
+        if cls in VOCAL_CLASSES and lyrics:
+            n_att = _attach_lyrics(events, lyrics.get("chars") or [])
+            logger.info("  [notation] lyrics: %d chars attached to %s", n_att, cls)
         if harmony_segments:
             try:
                 from src.harmony_prior import note_role
@@ -2109,6 +2166,13 @@ def build_notation(notes_json: dict, output_dir: str, mode: str = "both") -> dic
         "duration_stats": _duration_stats(out_tracks),
         "tracks": out_tracks,
     }
+    if lyrics:
+        # 精简透传（简谱按歌词行断行用；chars 已挂在 events 上）
+        notation["lyrics"] = {
+            "lines": [{"t0": l["t0"], "t1": l["t1"], "text": l["text"]}
+                      for l in lyrics.get("lines", [])],
+            "source_file": lyrics.get("source_file"),
+        }
     score_mids = _export_score_mids(out_tracks, bpm, output_dir, ql_per_measure)
     if score_mids:
         notation["score_mids"] = score_mids

@@ -85,9 +85,20 @@ export function parseNotationMeta(
     key?: string;
     analysis?: { summary?: string };
     time_map?: [number, number][];
+    time_signature?: string;
+    lyrics?: { lines?: { t0: number; t1: number; text: string }[]; source_file?: string };
     tracks?: {
       instrument_class: string;
-      events: { bar: number; onset_sec: number }[];
+      events: {
+        pitch: number;
+        onset_sec: number;
+        offset_sec: number;
+        bar: number;
+        voice?: number;
+        tie?: string | null;
+        lyric?: string;
+        frags: { bar: number; offset: number; dur: string; tie: string | null }[];
+      }[];
     }[];
   };
   const tracks = (n.tracks ?? []).map((t) => ({
@@ -95,12 +106,20 @@ export function parseNotationMeta(
     minBar: t.events.length ? t.events[0].bar : 0, // events 已按 onset 排序
     firstOnsetSec: t.events.length ? t.events[0].onset_sec : 0,
     noteCount: t.events.length,
+    // 人声轨保留全量事件（歌词谱/简谱渲染用；非人声轨丢弃减内存）
+    ...(familyFromInstrumentClass(t.instrument_class) === "vocal"
+      ? { events: t.events }
+      : {}),
   }));
   return {
     ...base,
     key: n.key,
     analysis: n.analysis,
     tracks,
+    lyrics: n.lyrics?.lines?.length
+      ? { lines: n.lyrics.lines, source_file: n.lyrics.source_file }
+      : undefined,
+    timeSignature: n.time_signature,
     timeMap: Array.isArray(n.time_map) ? n.time_map : undefined,
   };
 }
@@ -309,7 +328,8 @@ export async function switchDemoMidiSource(
   await loadDemoProject(entry.id, source, { pos, wasPlaying });
 }
 
-/** 文件选择统一分流：混选 .mid → 直接装载已有产物；纯音频 → 本地一键管线 */
+/** 文件选择统一分流：混选 .mid → 直接装载已有产物；纯音频 → 本地一键管线
+ *  （同选 .lrc = 歌词增强层：歌词谱/简谱；无 lrc = 纯旋律谱） */
 export function handlePickedFiles(files: File[]): void {
   const hasMid = files.some((f) => f.name.toLowerCase().endsWith(".mid"));
   if (hasMid) {
@@ -317,20 +337,40 @@ export function handlePickedFiles(files: File[]): void {
     return;
   }
   const audio = files.find((f) => /\.(flac|wav|mp3|ogg|m4a|aac)$/i.test(f.name));
-  if (audio) void startPipelineJob(audio);
+  if (!audio) return;
+  const lyric = files.find((f) => f.name.toLowerCase().endsWith(".lrc"));
+  void startPipelineJob(audio, lyric);
 }
 
 /** 本地一键管线桥（score_extraction/pipeline_server.py，端口 8420） */
 const PIPE_BASE = "http://127.0.0.1:8420";
 
-/** 选择音频 → 上传给本地管线 → 轮询进度 → 自动装载产物 */
-export async function startPipelineJob(audio: File): Promise<void> {
+/** 选择音频（可选同名 .lrc）→ 上传给本地管线 → 轮询进度 → 自动装载产物 */
+export async function startPipelineJob(
+  audio: File,
+  lyric?: File,
+): Promise<void> {
   const setP = usePlayerStore.getState().setProcessing;
   try {
     setP({ stage: "upload", pct: 1, label: "上传音频到本地管线…", elapsed: 0 });
+    const headers: Record<string, string> = {
+      "x-filename": encodeURIComponent(audio.name),
+    };
+    if (lyric) {
+      // urlsafe base64（去 padding）：服务端单头行上限 64KB，LRC 常规 2-5KB
+      const bytes = new Uint8Array(await lyric.arrayBuffer());
+      let bin = "";
+      for (let i = 0; i < bytes.length; i += 0x8000) {
+        bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      }
+      headers["x-lyric-b64"] = btoa(bin)
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_")
+        .replace(/=+$/, "");
+    }
     const r = await fetch(`${PIPE_BASE}/transcribe`, {
       method: "POST",
-      headers: { "x-filename": encodeURIComponent(audio.name) },
+      headers,
       body: await audio.arrayBuffer(),
     });
     if (!r.ok) {
