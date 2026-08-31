@@ -184,9 +184,102 @@ offset F1（BS raw / oracle / demucs）：ymt3 .51/.58/.27 一骑绝尘；ia .27
    - **域外基线行为符合设计**：bd（钢琴单域）在 URMP 真实管弦上 0.14–0.17 全场垫底；但在 BS 上反而 0.34–0.47 居中——合成 stem 每轨乐器单一，单域模型也能捡到本域轨道的部分分数。riley 的 flute recall .139 vs ia .362 是最干净的域外信号。
    - **per-instrument**：ia-amt 在弦乐组与 flute 全面领先，ymt3 在铜管略优；tuba（少音符、音色纯）最好恢复 .56，bassoon（软、簧片、低频密集）最难 .10——per-instrument 分解比总分更能暴露音色盲区。
 
+## 7. 2026-08-30 夜间增测：钢琴轴分离质量（bs_roformer vs htdemucs_6s）
+
+> 背景：v0.1.0 后管线钢琴策略 = 独奏钢琴走 ByteDance 旁路（canon 域外双 GT +9pt）、混音钢琴走 ia-amt 吃 raw。本次增测回答「钢琴域有没有更好的分离模型、能否改变混音侧格局」。驱动脚本 `eval/piano_sep_night.py`（分阶段可断跑），结果 JSON = 本目录 `axis2_piano_20260830.json` / `slakh_piano_20260830.json`，SI-SDR = `output/piano_night_20260830/sisdr.json`。
+
+分离模型新增两臂（均 bs_roformer 架构，MSST 推理，**单遍无 TTA**）：
+
+- **Mega piano**：MVSep Mega 53-stem 钢琴专用单 stem（dim256/depth12，77.6MB，noblebarkrr/BS-Roformer-MVSep-Mega-53-stems）
+- **SW 6-stem**：jarredou BS-RoFormer 6 件套取 piano（699MB，MoisesDB 训练，cdjmix1991/bandsplit-roformer-sw-by-jarredou）
+
+F2-piano 复现说明：原 `data/f2_piano` 已删，从 dyylab 的 MAESTRO v3.0.0 源数据 + 同 csv 行序 + 同 seed 20260822 + 同伴奏池 2338 重建；四列历史数字全部对上（clean .969/.964、raw .701/.729、demucs .700/.784 vs 原 .702/.785，千分位差 = ia 非确定性 + 重新分离）——下表与 08-24 表格可直接对行。
+
+### 7.1 钢琴 stem SI-SDR（mono 下混，参考 = clean/GT 钢琴音频；单位 dB）
+
+| 数据 | htdemucs_6s | Mega piano | SW 6-stem |
+|---|---|---|---|
+| F2-piano 40（mean / median） | 8.24 / 7.78 | 13.48 / 13.06 | **13.79 / 13.50** |
+| BabySlakh 20（mean / median） | **1.38 / 1.19** | 7.02 / 6.80 | 6.99 / 7.19 |
+
+bs_roformer 两臂对 htdemucs **+5.2~5.6dB（双域一致）**；Slakh 密集流行编配上 htdemucs 的钢琴 stem 已接近不可用（1.4dB）。
+
+### 7.2 F2-piano 40：note-F1@50ms（音高精确 / greedy 1-1 / micro，n_ref=36,516）
+
+| 前端 \ 输入 | clean 独奏 | raw 混音 | htdemucs stem | Mega stem | SW stem |
+|---|---|---|---|---|---|
+| bytedance | 0.969 | 0.701 | 0.700 | 0.852 | 0.871 |
+| ia-amt default | 0.964 | 0.729 | 0.785 | 0.875 | **0.882** |
+
+数量比：bd raw 1.13 → SW 1.10；ia raw 1.29 → SW 1.08（分离把两家都拉回健康带）。offset F1：ia@SW .329 > bd@SW .281。
+
+### 7.3 BabySlakh 20（域外密集流行编曲，渲染 MIDI 严格对齐，n_ref=22,742；ia 列 = piano+electric_piano 类门控 = 现行管线口径）
+
+| 前端 \ 输入 | raw | htdemucs stem | Mega stem | SW stem |
+|---|---|---|---|---|
+| bytedance | 0.387（数量比 2.25，P .28） | 0.347 | 0.720 | 0.761 |
+| ia-amt（门控） | 0.552 | 0.383 | 0.801 | **0.820**（P .90 / R .75） |
+
+密集混音上 htdemucs stem 对两家都是负资产（bd 0.387→0.347、ia 0.552→0.383）；bs_roformer stem 让 bytedance **+37.4pt**（0.387→0.761）、ia **+26.8pt**（0.552→0.820）。
+
+### 7.4 canon 尾端密集段（用户限定：定性，不做 GT F1）
+
+最密 30s 窗 = 245–275s（双 GT 并集 694 音头）：GT 密度 10.67 / 12.47 音每秒（两份 GT），bytedance 9.8（相对 Winston GT −8%）、ia 8.87（−17%）——bytedance 密集段密度保真更贴近 GT。音头精度互证：Slakh stem 列 note@25 bytedance 0.758 ≈ note@50 0.761，ia 0.650 << 0.820——ia 音头系统性迟 25–50ms（帧格所致），bytedance 音头更紧。
+
+### 7.5 花海真实曲试听（`output/piano_night_20260830/audition/花海试听/`，不入指标）
+
+bytedance 音符数/音域：raw 2961/25-104（08-30 白天）→ htdemucs stem 2824/26-103（没治住）→ Mega stem 1693/28-90 → SW stem 1458/28-90；参照 ia@raw 936/38-90。bs_roformer stem 把音高洪水收进正常钢琴域。
+
+### 7.6 结论
+
+1. **钢琴域确实有远好于 htdemucs 的分离模型**（用户 08-30 直觉成立）：bs_roformer 系钢琴 stem SI-SDR +5.2~5.6dB（双域），密集编配上 htdemucs 钢琴 stem 是坏的。
+2. **第 6 节结论 6 修订**：「分离对 bytedance 零收益」是 htdemucs 伪影谱的交互项，不是钢琴分离的死局——换 SW stem 后 bytedance raw→stem +17.0pt（F2-piano 0.701→0.871）/ +37.4pt（Slakh）。
+3. **piano-in-mix 最优配置 = ia-amt @ SW-piano-stem（门控 piano+electric_piano）**：F2-piano 0.882（vs 现行 ia@raw 0.729，+15.3pt）、Slakh 0.820（vs 0.552，+26.8pt）。bytedance 即使喂 SW stem（0.871 / 0.761）双域仍不反超 ia——**bytedance 的不可替代性收敛为「域外独奏钢琴」（canon +9pt）与音头精度（@25 紧、密集段密度保真）；混音钢琴的正解是「好分离 + ia-amt」，不是「好分离 + bytedance」**。
+4. **管线建议（未接线，待拍板）**：混音曲钢琴类改吃 SW（质量最高，699MB）或 Mega（78MB 近追：ia@Mega 0.875 / 0.801）钢琴 stem 的 ia-amt 输出。单遍无 TTA 已达此数，加 bigshifts 尚有余量。SW vs Mega trade-off = F1 0.7~4pt 之差 vs 体积 9 倍 / 推理 2-3 倍。
+
+### 7.7 2026-08-31 接线日：密度分层 + bd/ia 投票融合评测 + 分离器性能基准（用户验收轮）
+
+> 工具：`eval/piano_fusion_eval.py`（零 GPU，复用夜间产物）、`eval/piano_sep_bench.py`；结果 JSON `output/piano_night_20260830/fusion_eval.json` / `bench/`。
+
+**密度分层**（10s 窗按 GT 音头密度四分位分桶，note@50；检验用户假设「bytedance 快速高压段更好」）：
+
+| 数据（桶内 n_ref） | Q1 稀疏 ia / bd | Q2 | Q3 | Q4 密集 |
+|---|---|---|---|---|
+| F2p@mega（3849/6607/9757/16303） | .780 / .743 | .880 / .831 | .886 / .871 | .900 / .890 |
+| F2p@sw | .792 / .765 | .890 / .857 | .894 / .891 | **.903 / .903** |
+| Slakh@mega（1257/3463/6011/12011） | .630 / .475 | .747 / .727 | .799 / .752 | .846 / .790 |
+| Slakh@sw | .683 / .627 | .815 / .756 | .811 / .756 | .847 / .808 |
+
+裁决：F2-piano 上 bd 在最密桶确实追平 ia（sw 列 Q4 .9025 vs .9034），但稀疏桶差 2.7~3.8pt——**bd 的短板是稀疏段精度（幻音）而非密集段**；Slakh 密集桶 ia 仍领先 3.9~5.6pt。canon 尾端观察到的 bd 密集段优势属「域外独奏」效应（已由独奏旁路覆盖），不外推到混音域。
+
+**投票融合**（音符级 bd↔ia 匹配=pitch 精确+onset≤50ms；匹配对=bd 音头+ia 时值）：
+
+| 配方 | F2p@mega | F2p@sw | Slakh@mega | Slakh@sw |
+|---|---|---|---|---|
+| ia@stem（基线） | .8847 | .8908 | .8055 | .8218 |
+| bd@stem | .8668 | .8826 | .7312 | .7725 |
+| F1a 双确认并集（bd-only 恒留） | .8592 | .8734 | .7369 | .7761 |
+| F1b bd-only 密集窗才留 | .8669 | .8783 | .7522 | .7813 |
+| F1c bd-only 全弃 | .8855 | .8913 | .8107 | .8282 |
+| F2 纯交集 | .8895 | .8980 | .8018 | .8233 |
+| F3 密度路由 | .8761 | .8877 | .7489 | .7801 |
+
+判定（既定规则：双数据集 note@50 均 +≥1pt 且 precision 不降超 0.5pt）：**无配方达标 → 投票融合不接线**。加 bd-only 音符的配方全部因精度损失净亏；F2 纯交集精度最高（P .906~.934）但 F2p 仅 +0.5~0.7pt、Slakh 持平略降，留作「高精度模式」候选未接线。**纯 ia@stem 为混音域最优单源**。
+
+**分离器性能基准**（同输入单遍无 TTA，RTX 4060，用户规则=指标接近取占比小者）：
+
+| 模型 | 5×90s 墙钟 | 花海全长墙钟 | 峰值显存 | 落盘（5×90s） |
+|---|---|---|---|---|
+| Mega piano（78MB 单 stem） | 113.5s | 60.0s | 4930MB | 158.8MB |
+| SW 6-stem（699MB 六件套） | 107.4s | 59.0s | 5014MB | 952.6MB |
+
+墙钟与显存打平（差 <6%，噪声内），SW 落盘 6 倍（六 stem 全写）+ 权重体积 9 倍 → **默认 = Mega**（F1 让 0.7~1.9pt 换 1/6 落盘与 1/9 权重；`MUSE_PIANO_STEM=sw` 可切）。
+
+**管线接线（2026-08-31 落地）**：`versep_guitar` 模式 runs 增第三路 `piano:bspiano`（KEYS_CLASSES 门控），raw 路门控同步剔除 KEYS（互斥防双计，照抄吉他模式）；分离失败回退 raw 直推（现行行为）；notes.json separators 记 `piano: bsroformer-<model>`；新增 `src/piano_stem_sep.py`。独奏钢琴 bytedance 旁路（MUSE_PIANO_ENGINE）不动。
+
 ## 附：环境与复现
 
 - 数据：GuitarSet test 60 / F2 test 112（GuitarSet×MoisesDB，−8..+6dB）/ F2-piano 40（MAESTRO×MoisesDB）/ URMP 44（YourMT3 Zenodo 镜像 8021437）/ BabySlakh 20（Zenodo 4603870）
-- 脚本：`eval/grand_eval.py`（聚合）、`eval/pr_sweep.py`（PR 扫描）、`eval/urmp_align.py`（URMP GT 仿射+平滑残差对齐）、`eval/run_axis2.sh`、`eval/run_axis3.sh`、`train/gen_f2_piano.py`
-- 全部结果 JSON：`output/grand_eval/*.json`（URMP 含对齐前基线 `axis3_urmp_noalign.json` 与对齐后 `axis3_urmp.json`；对齐参数在各 `urmp_align_s*.log` 尾部 JSON）
-- 已知坑记录：URMP Sco MIDI 与音频含逐曲 rubato 失配（详见轴 3 对齐说明）；run_axis3.sh 的 BS 聚合曾误指 bd_oracle_urmp 且漏 riley（已修复，08-24）；BabySlakh all_src.mid 在 track 根目录而非 MIDI/ 子目录
+- 脚本：`eval/grand_eval.py`（聚合）、`eval/pr_sweep.py`（PR 扫描）、`eval/urmp_align.py`（URMP GT 仿射+平滑残差对齐）、`eval/run_axis2.sh`、`eval/run_axis3.sh`、`train/gen_f2_piano.py`；**08-30 增测**：`eval/piano_sep_night.py`（夜间驱动）、`eval/piano_night_extras.py`（canon 密集段 + 花海试听），F2-piano 同 seed 重建（源=dyylab maestro-v3.0.0）；**08-31 接线日**：`eval/piano_fusion_eval.py`（密度分层+融合评测）、`eval/piano_sep_bench.py`（分离器基准）、`src/piano_stem_sep.py`（管线钢琴 stem 分离，MUSE_PIANO_STEM=mega|sw|off）
+- 全部结果 JSON：`output/grand_eval/*.json`（URMP 含对齐前基线 `axis3_urmp_noalign.json` 与对齐后 `axis3_urmp.json`；对齐参数在各 `urmp_align_s*.log` 尾部 JSON）；**08-30 增测 JSON = 本目录 `axis2_piano_20260830.json` / `slakh_piano_20260830.json`**（原始转写/SI-SDR 产物在 `output/piano_night_20260830/`）
+- 已知坑记录：URMP Sco MIDI 与音频含逐曲 rubato 失配（详见轴 3 对齐说明）；run_axis3.sh 的 BS 聚合曾误指 bd_oracle_urmp 且漏 riley（已修复，08-24）；BabySlakh all_src.mid 在 track 根目录而非 MIDI/ 子目录；**08-30 增测坑**：demucs.separate CLI 位置参数是文件不是目录（目录会被当音频文件加载报错 5）；MSST/demucs 子进程 HF 心跳指 hf-mirror 免 SSL 重试卡顿；Slakh stems 的 audio_rendered=false 条目音频为静音（GT 构建按非静音过滤）

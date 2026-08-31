@@ -185,17 +185,35 @@ def run_multi_instrument(audio_path: str, output_dir: str, bpm: float,
     # versep_guitar = 混合（默认）：吉他走 VER-SEP stem（F2 证据 AUPRC 0.250→
     #   0.525 + 2.0 后下游 0.597），其余类混音直通（BS A/B：demucs stemwise 掉精度）
     separated = config.MULTI_SEPARATION != "off"
+    piano_stem_wav = None        # versep_guitar 分支填充；其余模式恒 None
+    piano_stem_model_name = ""
     if on_stage:
         on_stage("separate", "乐器分离" if separated else "混音直通")
     if config.MULTI_SEPARATION == "versep_guitar":
         from src.versep_sep import separate_guitar
         sep_dir = os.path.join(output_dir, "sep")
         guitar_wav = separate_guitar(audio_path, os.path.join(sep_dir, "versep"))
-        rest_gate = _ALL_CLASSES - GUITAR_CLASSES
+        # 钢琴混音路径（2026-08-31 接线，08-30 夜间增测：ia@bs_roformer-piano-stem
+        # F2p 0.729→0.882 / Slakh 0.552→0.820）；KEYS 类改从 stem 路来，
+        # raw 路门控同步剔除 KEYS（照抄吉他的互斥防双计）。失败回退 raw 直推。
+        from src.piano_stem_sep import piano_stem_model, separate_piano_bsroformer
+        piano_stem_model_name = piano_stem_model()
+        piano_stem_wav = None
+        if piano_stem_model_name != "off":
+            piano_stem_wav = separate_piano_bsroformer(
+                audio_path, os.path.join(sep_dir, "bspiano"))
         if guitar_wav is not None:
-            runs = [("guitar:versep", guitar_wav, GUITAR_CLASSES),
-                    ("<raw>", audio_path, rest_gate)]
-        else:  # VER-SEP 不可用 → 纯直通
+            runs = [("guitar:versep", guitar_wav, GUITAR_CLASSES)]
+            if piano_stem_wav:
+                runs.append(("piano:bspiano", piano_stem_wav, KEYS_CLASSES))
+                rest_gate = _ALL_CLASSES - GUITAR_CLASSES - KEYS_CLASSES
+            else:
+                rest_gate = _ALL_CLASSES - GUITAR_CLASSES
+            runs.append(("<raw>", audio_path, rest_gate))
+        elif piano_stem_wav is not None:  # VER-SEP 不可用但钢琴 stem 在
+            runs = [("piano:bspiano", piano_stem_wav, KEYS_CLASSES),
+                    ("<raw>", audio_path, _ALL_CLASSES - KEYS_CLASSES)]
+        else:  # 双分离均不可用 → 纯直通
             runs, separated = [("<raw>", audio_path, set())], False
     elif separated:
         runs = _separated_stem_specs(audio_path, output_dir)
@@ -359,6 +377,35 @@ def run_multi_instrument(audio_path: str, output_dir: str, bpm: float,
         groups["melody"] = vocal_notes
     groups = {k: v for k, v in groups.items() if len(v) >= MIN_CLASS_NOTES}
 
+    # 钢琴专用模型旁路（2026-08-30 XI）：钢琴主导曲（无人声 ∧ 唯一实质
+    # 非鼓类 = piano）的钢琴轨换 ByteDance 专用模型。canon 两份网友 GT
+    # A/B：F1 0.344/0.378 vs ia-amt 0.270/0.286、低音区 recall 14%→25%；
+    # 混音侧反向崩溃（花海 2961 音符 pitch 25-104 幻音洪水 vs ia-amt
+    # 936）——独奏钢琴训练的模型只在独奏域启用。MUSE_PIANO_ENGINE=
+    # bytedance|ia_amt 强制单侧。
+    _piano_engine = os.environ.get("MUSE_PIANO_ENGINE", "auto")
+    if "piano" in groups and _piano_engine != "ia_amt":
+        others_n = sum(len(v) for c, v in groups.items()
+                       if c not in ("piano", "drums"))
+        # 主导判据用音符占比（canon 的 VER-SEP 吉他漏音类 ~99 音符不该
+        # 挡住 2093 音符的钢琴主导曲；kyomu 吉他+弦乐俱在则不触发）
+        _solo_piano = vocal_notes is None and len(groups["piano"]) >= 3 * others_n
+        if _piano_engine == "bytedance" or (_piano_engine == "auto" and _solo_piano):
+            from src.bytedance_frontend import transcribe_bytedance
+            try:
+                bd = transcribe_bytedance(audio_path)
+                bd_notes = [{**n, "instrument_class": "piano",
+                             "confidence": 0.95}
+                            for n in bd.get("notes", [])]
+                if len(bd_notes) >= MIN_CLASS_NOTES:
+                    logger.info("  [multi] 钢琴旁路 → ByteDance 专用模型: "
+                                "%d 音符（ia-amt %d）",
+                                len(bd_notes), len(groups["piano"]))
+                    groups["piano"] = bd_notes
+            except Exception:
+                logger.warning("  [multi] ByteDance 钢琴旁路失败，保留 ia-amt",
+                               exc_info=True)
+
     # 记谱规则v1 §3 时值清洗 + §2 准入统计
     track_stats: dict[str, dict] = {}
     for cls, cls_notes in groups.items():
@@ -442,6 +489,8 @@ def run_multi_instrument(audio_path: str, output_dir: str, bpm: float,
                    **({"separators": {
                           "guitar": "VERSEP2.0+bs4",
                           "vocals": vocal_backbone or "raw-direct",
+                          "piano": ("bsroformer-" + piano_stem_model_name)
+                          if piano_stem_wav else "raw-direct",
                           "others": "htdemucs_6s" if config.MULTI_SEPARATION == "versep_demucs" else "raw-direct"},
                        "mode": config.MULTI_SEPARATION,
                        "stem_gating": True} if separated else {})},

@@ -1019,6 +1019,254 @@ def _attract_onset_events(events: list[dict], beat_units: int) -> int:
     return moved
 
 
+# ---------------------------------------------------------------------------
+# 人声制谱 v2：字驱动骨架 + 受限词表（2026-08-30 X）
+# ---------------------------------------------------------------------------
+# 依据：用户音乐课先验（四分/八分为主、16 分少、无 32 分；附点/切分合法；
+# 休止规整且句界为主）+ arXiv 2502.12438（人声可读记谱：16 分为最小值
+# 单位、休止由音间空隙取整、无 32 分）+ 全库实测（旧管线 melody 走乐器
+# 同款 1/12 细格：夏日 329 音符配 341 休止、16 分休止最多）。
+# 数据流反转：字级时间戳（CTC 精修 ±60~100ms）为骨架 → 字窗内 SOME 取
+# 音高 → 受限词表量化；行内零休止（音长吃满到下一字），行间短语休止。
+# MUSE_VOCAL_NOTATION=0 回退旧管线。
+
+# 词表单位=quarter-length（16 分音符=1/4，八分=1/2——首测曾把 1/16ql
+# 当"16 分"写出 64 分音符）。精细端止于 16 分（用户先验①+arXiv 2502.12438：
+# 16 分为最小值单位）；附点族=3/8(附点16)、3/4(附点8)、3/2(附点4)、3(附点2)。
+VOCAL_NOTE_VOCAB = [Fraction(4), Fraction(3), Fraction(2), Fraction(3, 2),
+                    Fraction(1), Fraction(3, 4), Fraction(1, 2), Fraction(3, 8),
+                    Fraction(1, 4)]
+VOCAL_TRIPLET_VOCAB = [Fraction(4), Fraction(2), Fraction(4, 3), Fraction(1),
+                       Fraction(2, 3), Fraction(1, 3)]
+VOCAL_REST_VOCAB = [Fraction(4), Fraction(3), Fraction(2), Fraction(3, 2),
+                    Fraction(1), Fraction(3, 4), Fraction(1, 2), Fraction(3, 8),
+                    Fraction(1, 4)]
+# 复合拍型的休止全取 1/12 倍数（_rest_pieces DP 的 int(p/unit) 截断对
+# 非 1/12 倍数词表会腐化——1/8 会被当 1/12）
+VOCAL_REST_TRIPLET_VOCAB = [Fraction(4), Fraction(3), Fraction(2),
+                            Fraction(4, 3), Fraction(1), Fraction(2, 3),
+                            Fraction(1, 3)]
+
+
+def _vocal_snap_units(k48: float, compound: bool) -> int:
+    """连续 1/48 位置 → 网格位（1/48 四分音符单位）。
+
+    二分拍型：16 分位（12 单位倍数）；复合拍型：加三连八分位（16 单位
+    倍数，GRID_POLICY 同源）。位置先验（Cemgil 分档 ×位移）：整拍 0.35 /
+    半拍 0.6 / 复合三连位 0.8 / 细位 1.0。
+    """
+    def grade(k: int) -> float:
+        if k % 48 == 0:
+            return 0.35
+        if k % 24 == 0:
+            return 0.60
+        if compound and k % 16 == 0:
+            return 0.80
+        return 1.0
+
+    steps = (12, 16) if compound else (12,)
+    base = round(k48)
+    cands = {k for k in range(base - 8, base + 9)
+             if any(k % s == 0 for s in steps)}
+    return min(cands, key=lambda k: abs(k48 - k) * grade(k))
+
+
+def _vocal_frag_cost(v: Fraction) -> int:
+    """人声片段代价：四分/二分/整小节=0，附点与三连=1，八分=1，16分=3。"""
+    if v in (Fraction(1, 4), Fraction(1, 2), Fraction(1),
+             Fraction(2), Fraction(4)):
+        return 0
+    if v in (Fraction(3, 8), Fraction(3, 4), Fraction(3, 2), Fraction(3),
+             Fraction(1, 3), Fraction(2, 3), Fraction(4, 3)):
+        return 1
+    return 3  # 1/4（16 分）
+
+
+def _vocal_fragments(onset_ql: Fraction, bound: Fraction,
+                     ql_per_measure: Fraction, compound: bool) -> list[Fraction]:
+    """人声受限词表片段链（自含 DP，单位 1/48——词表含 1/16 值，复用
+    _choose_fragments 的 1/12 DP 会被 int() 截断腐化）。小节内单值（附点
+    跨拍=切分合法），跨小节才拆，链 ≤2，宁短勿长链。"""
+    vocab = VOCAL_TRIPLET_VOCAB if compound else VOCAL_NOTE_VOCAB
+    unit = Fraction(1, 48)
+    segs: list[Fraction] = []
+    cur, rem = onset_ql, bound
+    while rem > 0:
+        m_end = (cur // ql_per_measure + 1) * ql_per_measure
+        span = min(rem, m_end - cur)
+        segs.append(span)
+        cur += span
+        rem -= span
+
+    def dp_exact(span: Fraction) -> list[Fraction] | None:
+        k = int(span / unit)
+        if k <= 0:
+            return []
+        best: dict[int, tuple[int, int, list[Fraction]]] = {0: (0, 0, [])}
+        for i in range(1, k + 1):
+            for v in vocab:
+                u = v / unit
+                if u.denominator != 1:
+                    continue
+                ui = int(u)
+                if ui <= i and (i - ui) in best:
+                    c, n, lst = best[i - ui]
+                    # 每片 +1 片数罚：附点单值(1片) 优先于 两个单位值(2片)
+                    # ——首测 1/2+1/4 压过 3/4，满谱 tie 对（用户先验②：附点合法）
+                    cand = (c + _vocal_frag_cost(v) + 1, n + 1, [v] + lst)
+                    if i not in best or cand[:2] < best[i][:2]:
+                        best[i] = cand
+        return best[k][2] if k in best else None
+
+    pieces: list[Fraction] = []
+    for span in segs:
+        seg = dp_exact(span)
+        if seg is None:  # 词表覆盖不到（理论不发生）
+            seg = [min(vocab, key=lambda x: abs(x - span))]
+        pieces.extend(seg)
+    if len(pieces) > 2:  # 降级：每段单片
+        pieces = [max((v for v in vocab if v <= s), default=s) for s in segs]
+    # 铁律：任何片不越小节线。降级换片会让段内留空隙、后续片累计左移越线
+    # （首测 [1.5,2.0]@beat2.25：第二片从小节内 3.75 伸到 5.75 → 整小节
+    # 溢出 +1.75 拍——_decompose 只按片起点归小节，不切片内越线）
+    out: list[Fraction] = []
+    cur = onset_ql
+    for p in pieces:
+        while p > 0:
+            m_end = (cur // ql_per_measure + 1) * ql_per_measure
+            take = min(p, m_end - cur)
+            if take <= 0:
+                break
+            out.append(take)
+            cur += take
+            p -= take
+    return out
+
+
+def build_vocal_track_events(cls: str, notes: list[dict], bpm: float,
+                             cont, ql_per_measure: Fraction,
+                             compound: bool,
+                             chars: list[dict] | None = None,
+                             lines: list[dict] | None = None) -> list[dict]:
+    """人声事件 v2：字骨架（chars 缺省时 SOME 音头退化，受限词表仍生效）。
+
+    骨架单位 = snap 后的网格位（1/48 单位整数）；同位字合并为一个事件
+    （_attach_lyrics 就近匹配自然串接成多字 syllable）；行末字吃满到行
+    t1；bound 封顶一小节（跨行余量交休止层=短语休止）。拖腔（字窗内
+    另一音高且起音明显晚）拆主副两事件，副事件无歌词。
+    事件契约与 build_track_events 输出一致（下游 assemble 共用）。
+    """
+    some = sorted(notes, key=lambda n: n["onset"])
+
+    # ---- 骨架：字组（同网格位合并）→ (k, end_k, line, t0, t1_raw) ----
+    skel: list[dict] = []
+    if chars and lines:
+        for li, L in enumerate(lines):
+            cs = sorted((c for c in chars if c["line_idx"] == li),
+                        key=lambda c: c["onset"])
+            groups: dict[int, list[dict]] = {}
+            for c in cs:
+                k = _vocal_snap_units(cont(c["onset"]) * 48, compound)
+                groups.setdefault(k, []).append(c)
+            order = sorted(groups)
+            for oi, k in enumerate(order):
+                g = groups[k]
+                if oi + 1 < len(order):
+                    end_k = order[oi + 1]
+                else:
+                    end_k = _vocal_snap_units(cont(L["t1"]) * 48, compound)
+                skel.append({"k": k, "end_k": max(end_k, k + 12), "line": li,
+                             "t0": g[0]["onset"], "t1": g[-1]["end"]})
+    else:  # 无 LRC：SOME 音头骨架
+        for j, n in enumerate(some):
+            k = _vocal_snap_units(cont(n["onset"]) * 48, compound)
+            if skel and k <= skel[-1]["k"]:
+                continue
+            if j + 1 < len(some):
+                end_k = _vocal_snap_units(cont(some[j + 1]["onset"]) * 48,
+                                          compound)
+            else:
+                end_k = _vocal_snap_units(cont(n["offset"]) * 48, compound)
+            skel.append({"k": k, "end_k": max(end_k, k + 12), "line": None,
+                         "t0": n["onset"], "t1": n["offset"]})
+    # 跨行单调守卫（行首 snap 早于前行末尾的极端情形）+ 事件不重叠铁律：
+    # 推晚后行首 k 的同时截断前行 end_k（首测溢出 +1.75 拍根因——重叠放置）
+    for i in range(1, len(skel)):
+        if skel[i]["k"] <= skel[i - 1]["k"]:
+            skel[i]["k"] = skel[i - 1]["k"] + 12
+            skel[i]["end_k"] = max(skel[i]["end_k"], skel[i]["k"] + 12)
+        skel[i - 1]["end_k"] = min(skel[i - 1]["end_k"], skel[i]["k"])
+
+    events: list[dict] = []
+    prev_pitch: int | None = None
+    for si, s in enumerate(skel):
+        # 音高 = 字窗内最大重叠 SOME 音
+        best, best_ov = None, 0.0
+        for n in some:
+            if n["onset"] > s["t1"]:
+                break
+            ov = min(n["offset"], s["t1"]) - max(n["onset"], s["t0"])
+            if ov > best_ov:
+                best, best_ov = n, ov
+        pitch = int(best["pitch"]) if best else \
+            (prev_pitch if prev_pitch is not None else 60)
+        prev_pitch = pitch
+
+        onset_ql = Fraction(s["k"], 48)
+        bound = min(Fraction(s["end_k"] - s["k"], 48), ql_per_measure)
+        frags = _vocal_fragments(onset_ql, max(bound, Fraction(1, 4)),
+                                 ql_per_measure, compound)
+        events.append({
+            "pitch": pitch, "voice": 1, "velocity": 100,
+            "onset_sec": round(s["t0"], 4), "offset_sec": round(s["t1"], 4),
+            "ornament": best.get("ornament") if best else None,
+            "rubato": False, "quant_confidence": 1.0 if best else 0.6,
+            "string": None, "fret": None,
+            "_onset_ql": onset_ql, "_frags_ql": frags,
+        })
+        # 拖腔副事件（一字多音）：字窗内另一音高、起音晚于字头 0.12s+
+        for n in some:
+            if n["onset"] <= s["t0"] + 0.12 or n["onset"] >= s["t1"] \
+                    or n["pitch"] == pitch:
+                continue
+            k2 = _vocal_snap_units(cont(n["onset"]) * 48, compound)
+            if k2 - s["k"] < 12 or s["end_k"] - k2 < 12:
+                continue
+            main_bound = Fraction(k2 - s["k"], 48)
+            if main_bound < Fraction(1, 4):
+                continue
+            events[-1]["_frags_ql"] = _vocal_fragments(
+                onset_ql, main_bound, ql_per_measure, compound)
+            sub_bound = min(Fraction(s["end_k"] - k2, 48), ql_per_measure)
+            events.append({
+                "pitch": int(n["pitch"]), "voice": 1, "velocity": 100,
+                "onset_sec": round(n["onset"], 4),
+                "offset_sec": round(s["t1"], 4),
+                "ornament": n.get("ornament"),
+                "rubato": False, "quant_confidence": 0.8,
+                "string": None, "fret": None,
+                "_onset_ql": Fraction(k2, 48),
+                "_frags_ql": _vocal_fragments(Fraction(k2, 48),
+                                              max(sub_bound, Fraction(1, 4)),
+                                              ql_per_measure, compound),
+            })
+            break  # 每字最多一个副事件（v1）
+
+    events.sort(key=lambda e: (e["_onset_ql"], e["pitch"]))
+    for ev in events:  # 与 build_track_events 尾部同构：分解+tie+和弦组
+        frs = _decompose(ev["_onset_ql"], ev.pop("_frags_ql"), ql_per_measure)
+        roles = _tie_roles(len(frs))
+        ev["bar"] = int(ev["_onset_ql"] // ql_per_measure)
+        ev["beat_in_bar"] = float(
+            ev["_onset_ql"] - Fraction(ev["bar"]) * ql_per_measure)
+        ev["frags"] = [{"bar": mi, "offset": float(off), "dur": str(d),
+                        "tie": role} for (mi, off, d), role in zip(frs, roles)]
+        ev["tie"] = roles[0]
+        del ev["_onset_ql"]
+        ev.setdefault("chord_id", None)
+    return events
+
+
 def build_track_events(cls: str, notes: list[dict], raw_onsets: dict[int, float],
                        bpm: float,
                        ql_map=None, resid_map=None,
@@ -1175,7 +1423,11 @@ def _rest_pieces(gap: Fraction, vocab: list[Fraction] | None) -> list[Fraction]:
     dp[0] = (0, 0, [])
     for i in range(1, k + 1):
         for p in pieces:
-            u = int(p / unit)
+            uf = p / unit
+            if uf.denominator != 1:
+                continue  # 非 1/12 倍数（如人声词表 1/8=1.5 单位）——int()
+                # 截断会把它当 1/12 用（1/16→0 无限步），整链总长超支
+            u = int(uf)
             if u <= i and dp[i - u] is not None:
                 c, n, lst = dp[i - u]
                 cand = (c + _dur_cost(p), n + 1, [p] + lst)
@@ -1370,7 +1622,8 @@ def assemble_solo_score(cls: str, events: list[dict], bpm: float,
                         ql_per_measure: Fraction = Fraction(4),
                         time_signature: str = "4/4",
                         harmony: list[dict] | None = None,
-                        clean_rests: bool = True):
+                        clean_rests: bool = True,
+                        rest_vocab: list[Fraction] | None = None):
     """单乐器谱。键盘族 = 大谱表（双 PartStaff），其余单谱表。
 
     events 需带 frags（量化产物）。harmony = T1 和弦段 → 首谱表插
@@ -1503,7 +1756,8 @@ def assemble_solo_score(cls: str, events: list[dict], bpm: float,
                 placed = _legalize_placed(placed)
                 _absorb_tiny_gaps(placed, ql_per_measure)
                 for off, obj in _fill_rests(placed, ql_per_measure,
-                                            REST_VOCAB if clean_rests else None,
+                                            (rest_vocab or REST_VOCAB)
+                                            if clean_rests else None,
                                             hide_rests=(li > 0)):
                     voice.insert(off, obj)
                 m.insert(0, voice)
@@ -2105,9 +2359,19 @@ def build_notation(notes_json: dict, output_dir: str, mode: str = "both") -> dic
         if cls == "drums":
             logger.info("  [notation] drums 谱 v1 不含，跳过")
             continue
-        events = build_track_events(cls, t["notes"], raw_onsets, bpm,
-                                     ql_map, resid_map, ql_per_measure,
-                                     beat_units)
+        if cls in VOCAL_CLASSES and os.environ.get("MUSE_VOCAL_NOTATION", "1") != "0":
+            # 人声制谱 v2（2026-08-30 X）：字骨架 + 受限词表；无字时 SOME
+            # 音头退化（词表先验仍生效）。MUSE_VOCAL_NOTATION=0 回退旧管线
+            events = build_vocal_track_events(
+                cls, t["notes"], bpm, rec["cont"], ql_per_measure, compound,
+                chars=(lyrics or {}).get("chars") if lyrics else None,
+                lines=(lyrics or {}).get("lines") if lyrics else None)
+            logger.info("  [notation] %s vocal-v2: %d 骨架事件（字驱动）",
+                        cls, len(events))
+        else:
+            events = build_track_events(cls, t["notes"], raw_onsets, bpm,
+                                        ql_map, resid_map, ql_per_measure,
+                                        beat_units)
         if cls in VOCAL_CLASSES and lyrics:
             n_att = _attach_lyrics(events, lyrics.get("chars") or [])
             logger.info("  [notation] lyrics: %d chars attached to %s", n_att, cls)
@@ -2189,9 +2453,13 @@ def build_notation(notes_json: dict, output_dir: str, mode: str = "both") -> dic
         transposition = _transpose_semitones(cls)
         stem = os.path.join(output_dir, "notation", "solo", cls)
         try:
+            _vrest = (VOCAL_REST_TRIPLET_VOCAB if compound
+                      else VOCAL_REST_VOCAB)
             score = assemble_solo_score(cls, t["events"], bpm, notation["key"],
                                         transposition, ql_per_measure, tsig,
-                                        harmony_segments)
+                                        harmony_segments,
+                                        rest_vocab=(_vrest if cls in VOCAL_CLASSES
+                                                    else None))
             _write_musicxml_exact(score, stem + ".musicxml")
             if cls in GUITAR_CLASSES:
                 tab = _build_tab_part_xml(t["events"], transposition,
