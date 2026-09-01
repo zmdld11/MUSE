@@ -88,6 +88,27 @@ def _resolve_checkpoint(model_type: str, repo: Path) -> Path:
     return _ensure_checkpoint(None, model_type=model_type)
 
 
+def unload_ia_amt() -> None:
+    """卸载进程内 ia-amt 模型并归还显存（下个任务会自动重载，代价 ~10s）。
+
+    管线在三路 ia 转写后进入 MelBand 等 MSST 大显存子进程（~5GB）；ia 模型
+    常驻（~2-3GB）会把 4060 8GB 顶到超订 → WDDM 挪共享显存，子进程慢
+    10-20×（2026-08-31 实测：MelBand 同输入单跑 51s vs 任务内 13min）。
+    """
+    _MODEL_CACHE.clear()
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001（无 CUDA 环境下无操作）
+        pass
+    logger.info("[ia-amt] unloaded（显存已归还）")
+
+
 def transcribe_ia_amt(audio_path: str, model_type: str = "guitar",
                       device: str | None = None,
                       velocity: int = 100,

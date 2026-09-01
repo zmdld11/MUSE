@@ -95,19 +95,16 @@ def assemble_demo(out_dir: Path, audio: str, bpm: float) -> None:
 
 
 def sync_to_frontend(out_dirs: list[Path]) -> None:
-    """管线输出目录（≥1 个）→ frontend/public/demo 多曲库。
+    """管线输出目录（≥1 个）→ frontend/public/demo 多曲库（增量式）。
 
     每曲一个子目录（index/info/notation/音频，路径相对子目录根，与单曲
-    结构一致）；根 index.json 写 v2 清单 {version:2, songs:[{id,name,dir,
-    audio,mids}]}，前端据此渲染切歌下拉。单曲时结构相同（清单长度 1）。
+    结构一致）；根 index.json 写 v2 清单 {version:2, songs:[...]}，前端据此
+    渲染切歌下拉。**清单从 demo 目录全量扫描重建**（含未传入的历史歌曲）——
+    逐首 --demo 不会把曲库写丢（08-31 事故根因：旧实现全量清空后只写传入
+    目录，17 首逐首同步后清单只剩最后一首）。下架歌曲 = 删对应子目录后
+    任意再跑一次同步。
     """
     FRONTEND_DEMO.mkdir(parents=True, exist_ok=True)
-    for child in FRONTEND_DEMO.iterdir():  # demo 目录是 gitignored 派生物
-        if child.is_dir():
-            shutil.rmtree(child)
-        else:
-            child.unlink()
-    songs: list[dict] = []
     for out_dir in out_dirs:
         idx_p = out_dir / "index.json"
         if not idx_p.exists():
@@ -116,6 +113,8 @@ def sync_to_frontend(out_dirs: list[Path]) -> None:
         idx = json.loads(idx_p.read_text(encoding="utf-8"))
         sid = out_dir.name
         dst = FRONTEND_DEMO / sid
+        if dst.exists():  # demo 目录是 gitignored 派生物，可整体重写
+            shutil.rmtree(dst)
         dst.mkdir()
         for item in ("index.json", "info.json", "notes.json"):
             if (out_dir / item).exists():
@@ -127,8 +126,14 @@ def sync_to_frontend(out_dirs: list[Path]) -> None:
         audio = idx.get("audio")
         if audio and (out_dir / audio).exists():
             _write_browser_audio(out_dir / audio, dst / audio)
+    songs: list[dict] = []
+    for child in sorted(FRONTEND_DEMO.iterdir()):
+        if not child.is_dir() or not (child / "index.json").exists():
+            continue
+        idx = json.loads((child / "index.json").read_text(encoding="utf-8"))
+        sid = child.name
         songs.append({"id": sid, "name": idx.get("name", sid), "dir": sid,
-                      "audio": audio, "mids": idx.get("mids", []),
+                      "audio": idx.get("audio"), "mids": idx.get("mids", []),
                       "raw_mids": idx.get("raw_mids", [])})
     (FRONTEND_DEMO / "index.json").write_text(
         json.dumps({"version": 2, "songs": songs}, ensure_ascii=False, indent=1),

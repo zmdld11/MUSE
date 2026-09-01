@@ -131,6 +131,8 @@ Thumbs.db
 # 模型权重安全岛（2026-08-21）：checkpoints/ 全部不进库，>100MB 会被 GitHub 拒收
 score_extraction/checkpoints/
 checkpoints/
+# 自训 ckpt 全局不进库（2026-09-01：guitar_crnn/vocal_crnn 的 *.best.ckpt 会撞 GitHub 限制）
+*.ckpt
 # source_separation/（2026-08-24）：新权重不进库（>100MB GitHub 拒收；老 model/*.pth 已在库的不动）
 source_separation/pretrained/*.th
 source_separation/versep/*.ckpt

@@ -192,6 +192,8 @@ def run_multi_instrument(audio_path: str, output_dir: str, bpm: float,
     if config.MULTI_SEPARATION == "versep_guitar":
         from src.versep_sep import separate_guitar
         sep_dir = os.path.join(output_dir, "sep")
+        if on_stage:
+            on_stage("separate", "吉他分离")
         guitar_wav = separate_guitar(audio_path, os.path.join(sep_dir, "versep"))
         # 钢琴混音路径（2026-08-31 接线，08-30 夜间增测：ia@bs_roformer-piano-stem
         # F2p 0.729→0.882 / Slakh 0.552→0.820）；KEYS 类改从 stem 路来，
@@ -200,6 +202,8 @@ def run_multi_instrument(audio_path: str, output_dir: str, bpm: float,
         piano_stem_model_name = piano_stem_model()
         piano_stem_wav = None
         if piano_stem_model_name != "off":
+            if on_stage:
+                on_stage("separate", "钢琴分离")
             piano_stem_wav = separate_piano_bsroformer(
                 audio_path, os.path.join(sep_dir, "bspiano"))
         if guitar_wav is not None:
@@ -240,6 +244,10 @@ def run_multi_instrument(audio_path: str, output_dir: str, bpm: float,
     if not groups:
         logger.warning("  [multi] no notes from default model")
         return False
+    # 三路 ia 转写已毕：卸载模型归还显存，给 MelBand 等 MSST 大显存子进程
+    # 让路（WDDM 超订实测让子进程慢 10-20×，见 ia_amt_frontend.unload_ia_amt）
+    from src.ia_amt_frontend import unload_ia_amt
+    unload_ia_amt()
     # 人声支线骨架（pre 版，2026-08-28 X）：MelBand 分离 + SOME 音符化替代
     # raw 直推的 melody/choir/harmony 类。必须在 ia-amt run 之后执行——两仓
     # 库都有顶层 infer.py，SOME 先加载会劫持 ia-amt 的 infer 解析（08-28 VII

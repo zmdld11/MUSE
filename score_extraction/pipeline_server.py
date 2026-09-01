@@ -36,10 +36,12 @@ JOBS_ROOT = SE / "output" / "web_jobs"
 PORT = 8420
 
 # 阶段 → (pct 起点, pct 终点, 预估秒[阶段内插值用])
+# 2026-08-31 上调：分离段已是三模型串行（VER-SEP bigshifts4 + Mega 钢琴
+# stem + MelBand 人声），5 分钟曲实测 ~4-5 分钟；转写段 3 路 ia + SOME。
 STAGE_SPANS = {
     "bpm": (0.0, 4.0, 5.0),
-    "separate": (4.0, 45.0, 170.0),
-    "transcribe": (45.0, 92.0, 120.0),
+    "separate": (4.0, 45.0, 330.0),
+    "transcribe": (45.0, 92.0, 180.0),
     "notation": (92.0, 99.0, 25.0),
 }
 
