@@ -297,10 +297,17 @@ def run_multi_instrument(audio_path: str, output_dir: str, bpm: float,
                                     len(lrc["lyric_lines"]))
                 line_starts = ([l["t0"] for l in lrc["lyric_lines"]]
                                if lrc else None)
-                r = transcribe_some(vocals_wav, line_boundaries=line_starts)
+                # 人声骨干可换：MUSE_VOCAL_ENGINE=m3 → 自研 VocalCRNN(m3st500，
+                # 元音头切分)；默认 some。下游增强层两骨干共用。
+                _vocal_engine = os.environ.get("MUSE_VOCAL_ENGINE", "some")
+                if _vocal_engine == "m3":
+                    from src.vocal_crnn_frontend import transcribe_m3
+                    r = transcribe_m3(vocals_wav, line_boundaries=line_starts)
+                else:
+                    r = transcribe_some(vocals_wav, line_boundaries=line_starts)
                 if r["note_count"] >= MIN_CLASS_NOTES:
                     vocal_notes = r["notes"]
-                    vocal_backbone = "melband+some"
+                    vocal_backbone = f"melband+{_vocal_engine}"
                     # offset 能量截断（无歌词依赖，SOME 长音拖尾 p90 +455ms）
                     from src.lyric_align import (detect_ornaments,
                                                  trim_vocal_offsets)
