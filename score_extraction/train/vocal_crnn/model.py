@@ -17,7 +17,7 @@ class VocalCRNN(nn.Module):
     def __init__(self, n_mels: int = 128, conv_ch=(48, 96, 192, 384),
                  gru_hidden: int = 256, gru_layers: int = 2,
                  n_classes: int = N_CLASSES, dropout: float = 0.2,
-                 with_vowel: bool = False):
+                 with_vowel: bool = False, with_dur: bool = False):
         super().__init__()
         convs, ch = [], 1
         for c in conv_ch:
@@ -38,6 +38,9 @@ class VocalCRNN(nn.Module):
         self.with_vowel = with_vowel              # M3：元音起始头
         if with_vowel:
             self.head_vowel = nn.Linear(out, 1)
+        self.with_dur = with_dur                  # S2v2-13：log 剩余时长回归头
+        if with_dur:
+            self.head_dur = nn.Linear(out, 1)
 
     def forward(self, mel: torch.Tensor, lengths: torch.Tensor) -> dict:
         """mel (B,1,128,T) → dict of (B,T) / (B,T,46)。"""
@@ -54,6 +57,8 @@ class VocalCRNN(nn.Module):
              "vib": self.head_vib(out).squeeze(-1)}
         if self.with_vowel:
             d["vowel"] = self.head_vowel(out).squeeze(-1)
+        if self.with_dur:
+            d["dur"] = self.head_dur(out).squeeze(-1)
         return d
 
 

@@ -95,10 +95,15 @@ def frame_targets(notes: list[dict], vib_depth: np.ndarray | None,
     - vowel（M3）：元音起始帧置 1（无标注段全 0，loss 由 vowel_valid 掩码）
     - offset_dilate（S2v2-12）：offset 目标 ±N 帧三角软标（权重和=1），
       治"单帧硬正例 → 头学得尖而脆、拖音系统性偏早"；0=历史硬标不变
+    - dur/dur_mask（S2v2-13）：稠密 log 剩余时长回归目标——音符内每帧
+      log(距结束帧数)，解码在 onset 帧读一次直接得 offset 候选；
+      voiced 帧全监督，绕开 offset 单帧正例的稀疏病根
     """
     onset = np.zeros(n_frames, dtype=np.float32)
     offset = np.zeros(n_frames, dtype=np.float32)
     pitch = np.zeros(n_frames, dtype=np.int64)
+    dur = np.zeros(n_frames, dtype=np.float32)
+    dur_mask = np.zeros(n_frames, dtype=np.float32)
     if offset_dilate > 0:
         k = np.array([1.0 - abs(j) / (offset_dilate + 1)
                       for j in range(-offset_dilate, offset_dilate + 1)],
@@ -125,6 +130,9 @@ def frame_targets(notes: list[dict], vib_depth: np.ndarray | None,
         else:
             offset[i_off] = 1.0
         pitch[i0:i1] = p - PITCH_LO + 1
+        dur[i0:i1] = np.log(np.maximum(
+            np.arange(i1 - i0, 0, -1, dtype=np.float32), 1.0))
+        dur_mask[i0:i1] = 1.0
     if vib_depth is not None and len(vib_depth):
         src_t = np.arange(len(vib_depth)) / gt_fps
         dst_t = np.arange(n_frames) * HOP_SEC
@@ -138,7 +146,7 @@ def frame_targets(notes: list[dict], vib_depth: np.ndarray | None,
         if 0 <= i < n_frames:
             vowel[i] = 1.0
     return {"onset": onset, "offset": offset, "pitch": pitch, "vib": vib,
-            "vowel": vowel,
+            "vowel": vowel, "dur": dur, "dur_mask": dur_mask,
             "voiced": (pitch > 0).astype(np.float32)}
 
 
@@ -226,6 +234,8 @@ class SynthVocalDataset(Dataset):
         pitch = torch.zeros(B, T, dtype=torch.long)
         vib = torch.zeros(B, T)
         vowel = torch.zeros(B, T)
+        dur = torch.zeros(B, T)
+        dur_mask = torch.zeros(B, T)
         lengths = torch.zeros(B, dtype=torch.long)
         vib_valid = torch.zeros(B)
         vowel_valid = torch.zeros(B)
@@ -237,6 +247,8 @@ class SynthVocalDataset(Dataset):
             pitch[i, :t] = torch.as_tensor(b["pitch"])
             vib[i, :t] = torch.as_tensor(b["vib"])
             vowel[i, :t] = torch.as_tensor(b["vowel"])
+            dur[i, :t] = torch.as_tensor(b["dur"])
+            dur_mask[i, :t] = torch.as_tensor(b["dur_mask"])
             lengths[i] = t
             vib_valid[i] = b.get("vib_valid", 0.0)
             vowel_valid[i] = b.get("vowel_valid", 0.0)
@@ -244,4 +256,5 @@ class SynthVocalDataset(Dataset):
         return {"ids": [b["id"] for b in batch], "mel": mel, "lengths": lengths,
                 "onset": onset, "offset": offset, "pitch": pitch,
                 "vib": vib, "vowel": vowel, "mask": mask,
+                "dur": dur, "dur_mask": dur_mask,
                 "vib_valid": vib_valid, "vowel_valid": vowel_valid}

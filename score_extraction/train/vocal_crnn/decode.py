@@ -34,11 +34,16 @@ def decode_notes(onset_prob: np.ndarray, offset_prob: np.ndarray,
                  pitch_logits: np.ndarray, hop_sec: float = HOP_SEC,
                  onset_th: float = 0.5, offset_th: float = 0.5,
                  min_dur_sec: float = 0.03,
-                 unvoiced_run_sec: float = 0.08) -> list[dict]:
+                 unvoiced_run_sec: float = 0.08,
+                 dur: np.ndarray | None = None,
+                 dur_mode: str = "off") -> list[dict]:
     """三路输出 → 音符表。pitch_logits (T, 46)。
 
     unvoiced_run_sec：连续 unvoiced 多久截尾（S2v2-10 起参数化，默认 0.08
     = 历史 M1 行为不变）。
+    dur/dur_mode（S2v2-13）：log 剩余时长回归——onset 帧读 exp(dur) 得
+    候选终点。"off"=不用（历史行为）；"min"=与 offset/unvoiced 截止竞争
+    只截短；"standalone"=完全以 dur 为准（offset/unvoiced 不参与截止）。
     """
     T = len(onset_prob)
     if T == 0:
@@ -67,6 +72,14 @@ def decode_notes(onset_prob: np.ndarray, offset_prob: np.ndarray,
                 if run >= uv_frames:
                     end = min(end, j - run + 1)
                     break
+        # 3) dur 回归截止（S2v2-13）
+        if dur is not None and dur_mode != "off" and i0 < len(dur):
+            d_end = i0 + max(min_frames,
+                             int(round(float(np.exp(dur[i0])))))
+            if dur_mode == "standalone":
+                end = min(max(d_end, lo), min(nxt, T))
+            else:                                  # min：只截短不延长
+                end = max(lo, min(end, d_end))
         if end - i0 < min_frames:
             continue
         seg = voiced_cls[i0:end][voiced_flag[i0:end]]
