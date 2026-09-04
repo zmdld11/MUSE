@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 _HERE = Path(__file__).resolve().parent           # src/
 _SE = _HERE.parent                                # score_extraction/
-_CKPT_DEFAULT = _SE / "output" / "vocal_crnn" / "m3st500.best.ckpt"
+_CKPT_DEFAULT = _SE / "model" / "vocal_crnn" / "m3st500.best.ckpt"
 
 # 滑窗推理参数（帧率 ≈100.23fps：hop 220 / SR 22050）
 _WIN_FRAMES = 6000        # ≈60s
