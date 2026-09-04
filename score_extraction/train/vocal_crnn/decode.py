@@ -33,8 +33,13 @@ def pick_peaks(prob: np.ndarray, th: float = 0.5,
 def decode_notes(onset_prob: np.ndarray, offset_prob: np.ndarray,
                  pitch_logits: np.ndarray, hop_sec: float = HOP_SEC,
                  onset_th: float = 0.5, offset_th: float = 0.5,
-                 min_dur_sec: float = 0.03) -> list[dict]:
-    """三路输出 → 音符表。pitch_logits (T, 46)。"""
+                 min_dur_sec: float = 0.03,
+                 unvoiced_run_sec: float = 0.08) -> list[dict]:
+    """三路输出 → 音符表。pitch_logits (T, 46)。
+
+    unvoiced_run_sec：连续 unvoiced 多久截尾（S2v2-10 起参数化，默认 0.08
+    = 历史 M1 行为不变）。
+    """
     T = len(onset_prob)
     if T == 0:
         return []
@@ -43,6 +48,7 @@ def decode_notes(onset_prob: np.ndarray, offset_prob: np.ndarray,
     peaks = pick_peaks(onset_prob, th=onset_th,
                        min_gap_frames=max(1, round(0.05 / hop_sec)))
     min_frames = max(1, round(min_dur_sec / hop_sec))
+    uv_frames = max(1, round(unvoiced_run_sec / hop_sec))
     notes = []
     for k, i0 in enumerate(peaks):
         nxt = peaks[k + 1] if k + 1 < len(peaks) else T
@@ -54,11 +60,11 @@ def decode_notes(onset_prob: np.ndarray, offset_prob: np.ndarray,
             hits = np.nonzero(offset_prob[lo:end] > offset_th)[0]
             if len(hits):
                 end = min(end, lo + int(hits[0]))
-            # 2) 连续 80ms unvoiced → 截止到 run 起点
+            # 2) 连续 unvoiced 超过阈值 → 截止到 run 起点
             run = 0
             for j in range(lo, end):
                 run = run + 1 if not voiced_flag[j] else 0
-                if run >= round(0.08 / hop_sec):
+                if run >= uv_frames:
                     end = min(end, j - run + 1)
                     break
         if end - i0 < min_frames:
@@ -97,7 +103,8 @@ def decode_notes_vowel(onset_prob: np.ndarray, offset_prob: np.ndarray,
                        hop_sec: float = HOP_SEC, onset_th: float = 0.5,
                        offset_th: float = 0.5, vowel_th: float = 0.5,
                        min_dur_sec: float = 0.03, min_split_sec: float = 0.12,
-                       lead_sec: float = 0.06) -> list[dict]:
+                       lead_sec: float = 0.06,
+                       unvoiced_run_sec: float = 0.08) -> list[dict]:
     """M3：基础解码 + 元音起始强制切分跨字长音。
 
     规则：一个音内若含元音峰（与音起点/前切点隔 ≥min_split_sec、与音终点隔
@@ -105,7 +112,7 @@ def decode_notes_vowel(onset_prob: np.ndarray, offset_prob: np.ndarray,
     优先，否则元音峰回退 lead_sec。切分不发明新音高，每段独立中位重估。
     """
     notes = decode_notes(onset_prob, offset_prob, pitch_logits, hop_sec,
-                         onset_th, offset_th, min_dur_sec)
+                         onset_th, offset_th, min_dur_sec, unvoiced_run_sec)
     vpeaks = pick_peaks(vowel_prob, th=vowel_th,
                         min_gap_frames=max(1, round(0.08 / hop_sec)))
     min_split_f = max(1, round(min_split_sec / hop_sec))

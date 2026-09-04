@@ -85,17 +85,25 @@ def wav_to_mel(wav: np.ndarray, device: str = "cpu") -> torch.Tensor:
 
 def frame_targets(notes: list[dict], vib_depth: np.ndarray | None,
                   n_frames: int, gt_fps: float = 100.0,
-                  vowel_onsets: list[float] | None = None) -> dict:
+                  vowel_onsets: list[float] | None = None,
+                  offset_dilate: int = 0) -> dict:
     """manifest 音符表 + npz 颤音深度 → 帧级目标。
 
     - onset/offset：音符起/止帧置 1（offset 帧=音符结束所在帧）
     - pitch：voiced 帧 = pitch-PITCH_LO+1（1..45），unvoiced = 0
     - vib：npz vib_depth(100fps) 线性插值到模型帧率
     - vowel（M3）：元音起始帧置 1（无标注段全 0，loss 由 vowel_valid 掩码）
+    - offset_dilate（S2v2-12）：offset 目标 ±N 帧三角软标（权重和=1），
+      治"单帧硬正例 → 头学得尖而脆、拖音系统性偏早"；0=历史硬标不变
     """
     onset = np.zeros(n_frames, dtype=np.float32)
     offset = np.zeros(n_frames, dtype=np.float32)
     pitch = np.zeros(n_frames, dtype=np.int64)
+    if offset_dilate > 0:
+        k = np.array([1.0 - abs(j) / (offset_dilate + 1)
+                      for j in range(-offset_dilate, offset_dilate + 1)],
+                     dtype=np.float32)
+        k /= k.sum()
     for nt in notes:
         if isinstance(nt, dict):                     # synth manifest 格式
             on, off, p = float(nt["onset"]), float(nt["offset"]), int(nt["pitch"])
@@ -108,7 +116,14 @@ def frame_targets(notes: list[dict], vib_depth: np.ndarray | None,
         i0 = max(0, min(i0, n_frames - 1))
         i1 = max(i0 + 1, min(i1, n_frames))
         onset[i0] = 1.0
-        offset[min(i1, n_frames - 1)] = 1.0
+        i_off = min(i1, n_frames - 1)
+        if offset_dilate > 0:
+            for w, j in zip(k, range(-offset_dilate, offset_dilate + 1)):
+                idx = i_off + j
+                if 0 <= idx < n_frames:
+                    offset[idx] = max(offset[idx], w)   # max 防相邻音叠加爆表
+        else:
+            offset[i_off] = 1.0
         pitch[i0:i1] = p - PITCH_LO + 1
     if vib_depth is not None and len(vib_depth):
         src_t = np.arange(len(vib_depth)) / gt_fps
@@ -158,10 +173,12 @@ class SynthVocalDataset(Dataset):
     """
 
     def __init__(self, data_dir: str | Path, ids: list[str],
-                 use_mix: bool = False, mel_device: str = "cpu"):
+                 use_mix: bool = False, mel_device: str = "cpu",
+                 offset_dilate: int = 0):
         self.root = Path(data_dir)
         self.use_mix = use_mix
         self.mel_device = mel_device
+        self.offset_dilate = offset_dilate
         by_id = {m["id"]: m for m in load_manifest(data_dir)}
         self.items: list[dict] = []
         for i in ids:
@@ -192,7 +209,8 @@ class SynthVocalDataset(Dataset):
             if has_vib else None
         mel = wav_to_mel(wav, device=self.mel_device).cpu()
         tgt = frame_targets(m["notes"], vib, mel.shape[0],
-                            vowel_onsets=m.get("vowel_onsets"))
+                            vowel_onsets=m.get("vowel_onsets"),
+                            offset_dilate=self.offset_dilate)
         return {"id": m["id"], "mel": mel, "n_frames": mel.shape[0],
                 "vib_valid": 1.0 if has_vib else 0.0,
                 "vowel_valid": float(m.get("vowel_valid", 0)), **tgt}
