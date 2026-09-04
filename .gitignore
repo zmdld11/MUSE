@@ -156,3 +156,20 @@ data_bs/
 # 前端构建产物（Tauri/pnpm）
 frontend/src-tauri/target/
 node_modules/
+
+# ===== 研究线隔离（2026-09-04）：论文/实验工作区迁至 D:\program_project\VocalTest（私有）=====
+# 研究代码留本地但不进公开仓库；系统仅依赖 train/ 白名单 5 件
+# （src/transcriber.py 的 model/model_v4 + src/vocal_crnn_frontend.py 动态加载的 vocal_crnn 三件）
+score_extraction/eval/
+score_extraction/train/*
+!score_extraction/train/__init__.py
+!score_extraction/train/model.py
+!score_extraction/train/model_v4.py
+!score_extraction/train/vocal_crnn/
+score_extraction/train/vocal_crnn/*
+!score_extraction/train/vocal_crnn/dataset.py
+!score_extraction/train/vocal_crnn/model.py
+!score_extraction/train/vocal_crnn/decode.py
+# 自训权重目录不入库（archive/ 历史评测记录保留）
+score_extraction/model/*
+!score_extraction/model/archive/
