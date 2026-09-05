@@ -86,7 +86,8 @@ def wav_to_mel(wav: np.ndarray, device: str = "cpu") -> torch.Tensor:
 def frame_targets(notes: list[dict], vib_depth: np.ndarray | None,
                   n_frames: int, gt_fps: float = 100.0,
                   vowel_onsets: list[float] | None = None,
-                  offset_dilate: int = 0) -> dict:
+                  offset_dilate: int = 0,
+                  vowels: list[list[float]] | None = None) -> dict:
     """manifest 音符表 + npz 颤音深度 → 帧级目标。
 
     - onset/offset：音符起/止帧置 1（offset 帧=音符结束所在帧）
@@ -98,12 +99,18 @@ def frame_targets(notes: list[dict], vib_depth: np.ndarray | None,
     - dur/dur_mask（S2v2-13）：稠密 log 剩余时长回归目标——音符内每帧
       log(距结束帧数)，解码在 onset 帧读一次直接得 offset 候选；
       voiced 帧全监督，绕开 offset 单帧正例的稀疏病根
+    - 塔式三路（VT-1）：pitch_onset / pitch_offset / pitch_act (T,45)
+      逐音高多标签（吉他线 dataset 同构）；vowel_id (T,) 韵母类别
+      （统一 88 类表，0=非元音起始，loss 由 vowel_valid 掩码）
     """
     onset = np.zeros(n_frames, dtype=np.float32)
     offset = np.zeros(n_frames, dtype=np.float32)
     pitch = np.zeros(n_frames, dtype=np.int64)
     dur = np.zeros(n_frames, dtype=np.float32)
     dur_mask = np.zeros(n_frames, dtype=np.float32)
+    p_onset = np.zeros((n_frames, N_PITCH_CLS), dtype=np.float32)
+    p_offset = np.zeros((n_frames, N_PITCH_CLS), dtype=np.float32)
+    p_act = np.zeros((n_frames, N_PITCH_CLS), dtype=np.float32)
     if offset_dilate > 0:
         k = np.array([1.0 - abs(j) / (offset_dilate + 1)
                       for j in range(-offset_dilate, offset_dilate + 1)],
@@ -130,6 +137,10 @@ def frame_targets(notes: list[dict], vib_depth: np.ndarray | None,
         else:
             offset[i_off] = 1.0
         pitch[i0:i1] = p - PITCH_LO + 1
+        bin_ = p - PITCH_LO
+        p_onset[i0, bin_] = 1.0
+        p_offset[i_off, bin_] = 1.0
+        p_act[i0:i1, bin_] = 1.0
         dur[i0:i1] = np.log(np.maximum(
             np.arange(i1 - i0, 0, -1, dtype=np.float32), 1.0))
         dur_mask[i0:i1] = 1.0
@@ -141,16 +152,38 @@ def frame_targets(notes: list[dict], vib_depth: np.ndarray | None,
     else:
         vib = np.zeros(n_frames, dtype=np.float32)
     vowel = np.zeros(n_frames, dtype=np.float32)
+    vowel_id = np.zeros(n_frames, dtype=np.int64)
     for t in (vowel_onsets or []):
         i = int(round(float(t) / HOP_SEC))
         if 0 <= i < n_frames:
             vowel[i] = 1.0
+    for c, t in (vowels or []):                        # VT-1：韵母身份
+        i = int(round(float(t) / HOP_SEC))
+        if 0 <= i < n_frames and int(c) > 0:
+            vowel_id[i] = int(c)
     return {"onset": onset, "offset": offset, "pitch": pitch, "vib": vib,
             "vowel": vowel, "dur": dur, "dur_mask": dur_mask,
+            "pitch_onset": p_onset, "pitch_offset": p_offset,
+            "pitch_act": p_act, "vowel_id": vowel_id,
             "voiced": (pitch > 0).astype(np.float32)}
 
 
 # ------------------------------ Dataset ------------------------------
+
+def n_vowel_cls() -> int:
+    """统一韵母类别数（VT-1）——gtsinger_build.py 落盘的 vowel_cls.json
+    为唯一真源（train/heldout 两侧同表；缺失即报错防静默错位）。"""
+    global _N_VOWEL_CLS
+    if _N_VOWEL_CLS is None:
+        p = Path(__file__).resolve().parents[2] / "data" / "gtsinger_m3" \
+            / "vowel_cls.json"
+        _N_VOWEL_CLS = len(
+            json.loads(p.read_text(encoding="utf-8"))["classes"])
+    return _N_VOWEL_CLS
+
+
+_N_VOWEL_CLS: int | None = None
+
 
 def load_manifest(data_dir: str | Path) -> list[dict]:
     """manifest.json 优先；缺省则合并 manifest_*.json（GTSinger 按语言增量）。"""
@@ -218,7 +251,8 @@ class SynthVocalDataset(Dataset):
         mel = wav_to_mel(wav, device=self.mel_device).cpu()
         tgt = frame_targets(m["notes"], vib, mel.shape[0],
                             vowel_onsets=m.get("vowel_onsets"),
-                            offset_dilate=self.offset_dilate)
+                            offset_dilate=self.offset_dilate,
+                            vowels=m.get("vowels"))
         return {"id": m["id"], "mel": mel, "n_frames": mel.shape[0],
                 "vib_valid": 1.0 if has_vib else 0.0,
                 "vowel_valid": float(m.get("vowel_valid", 0)), **tgt}
@@ -236,6 +270,10 @@ class SynthVocalDataset(Dataset):
         vowel = torch.zeros(B, T)
         dur = torch.zeros(B, T)
         dur_mask = torch.zeros(B, T)
+        p_onset = torch.zeros(B, T, N_PITCH_CLS)
+        p_offset = torch.zeros(B, T, N_PITCH_CLS)
+        p_act = torch.zeros(B, T, N_PITCH_CLS)
+        vowel_id = torch.zeros(B, T, dtype=torch.long)
         lengths = torch.zeros(B, dtype=torch.long)
         vib_valid = torch.zeros(B)
         vowel_valid = torch.zeros(B)
@@ -249,6 +287,10 @@ class SynthVocalDataset(Dataset):
             vowel[i, :t] = torch.as_tensor(b["vowel"])
             dur[i, :t] = torch.as_tensor(b["dur"])
             dur_mask[i, :t] = torch.as_tensor(b["dur_mask"])
+            p_onset[i, :t] = torch.as_tensor(b["pitch_onset"])
+            p_offset[i, :t] = torch.as_tensor(b["pitch_offset"])
+            p_act[i, :t] = torch.as_tensor(b["pitch_act"])
+            vowel_id[i, :t] = torch.as_tensor(b["vowel_id"])
             lengths[i] = t
             vib_valid[i] = b.get("vib_valid", 0.0)
             vowel_valid[i] = b.get("vowel_valid", 0.0)
@@ -257,4 +299,6 @@ class SynthVocalDataset(Dataset):
                 "onset": onset, "offset": offset, "pitch": pitch,
                 "vib": vib, "vowel": vowel, "mask": mask,
                 "dur": dur, "dur_mask": dur_mask,
+                "pitch_onset": p_onset, "pitch_offset": p_offset,
+                "pitch_act": p_act, "vowel_id": vowel_id,
                 "vib_valid": vib_valid, "vowel_valid": vowel_valid}
