@@ -87,7 +87,8 @@ def frame_targets(notes: list[dict], vib_depth: np.ndarray | None,
                   n_frames: int, gt_fps: float = 100.0,
                   vowel_onsets: list[float] | None = None,
                   offset_dilate: int = 0,
-                  vowels: list[list[float]] | None = None) -> dict:
+                  vowels: list[list[float]] | None = None,
+                  reg_target: bool = False) -> dict:
     """manifest 音符表 + npz 颤音深度 → 帧级目标。
 
     - onset/offset：音符起/止帧置 1（offset 帧=音符结束所在帧）
@@ -102,6 +103,10 @@ def frame_targets(notes: list[dict], vib_depth: np.ndarray | None,
     - 塔式三路（VT-1）：pitch_onset / pitch_offset / pitch_act (T,45)
       逐音高多标签（吉他线 dataset 同构）；vowel_id (T,) 韵母类别
       （统一 88 类表，0=非元音起始，loss 由 vowel_valid 掩码）
+    - reg_target（E2，Kong 2021 回归式软目标）：onset/offset 通道目标
+      = 未归一三角 max(0, 1-|i-t_event|)——值本身编码亚帧位置（区别于
+      S2v2-12 的归一化权重软化：k/=sum 把位置信息摊没了），解码端配
+      三角插值取亚帧时间；对 ±1 帧级标注噪声近乎免疫（TASLP 2021 证据）
     """
     onset = np.zeros(n_frames, dtype=np.float32)
     offset = np.zeros(n_frames, dtype=np.float32)
@@ -116,6 +121,18 @@ def frame_targets(notes: list[dict], vib_depth: np.ndarray | None,
                       for j in range(-offset_dilate, offset_dilate + 1)],
                      dtype=np.float32)
         k /= k.sum()
+    def tri_put(arr2d_or_1d, t_ev: float, bin_: int | None):
+        """reg 模式：事件时间 t_ev（帧单位浮点）±1 帧写未归一三角。"""
+        lo, hi = int(np.floor(t_ev)) - 1, int(np.ceil(t_ev)) + 1
+        for i in range(max(0, lo), min(n_frames, hi + 1)):
+            v = max(0.0, 1.0 - abs(i - t_ev))
+            if v <= 0.0:
+                continue
+            if bin_ is None:
+                arr2d_or_1d[i] = max(arr2d_or_1d[i], v)
+            else:
+                arr2d_or_1d[i, bin_] = max(arr2d_or_1d[i, bin_], v)
+
     for nt in notes:
         if isinstance(nt, dict):                     # synth manifest 格式
             on, off, p = float(nt["onset"]), float(nt["offset"]), int(nt["pitch"])
@@ -127,19 +144,25 @@ def frame_targets(notes: list[dict], vib_depth: np.ndarray | None,
         i1 = int(round(off / HOP_SEC))
         i0 = max(0, min(i0, n_frames - 1))
         i1 = max(i0 + 1, min(i1, n_frames))
-        onset[i0] = 1.0
-        i_off = min(i1, n_frames - 1)
-        if offset_dilate > 0:
-            for w, j in zip(k, range(-offset_dilate, offset_dilate + 1)):
-                idx = i_off + j
-                if 0 <= idx < n_frames:
-                    offset[idx] = max(offset[idx], w)   # max 防相邻音叠加爆表
-        else:
-            offset[i_off] = 1.0
-        pitch[i0:i1] = p - PITCH_LO + 1
         bin_ = p - PITCH_LO
-        p_onset[i0, bin_] = 1.0
-        p_offset[i_off, bin_] = 1.0
+        i_off = min(i1, n_frames - 1)
+        if reg_target:
+            tri_put(onset, on / HOP_SEC, None)
+            tri_put(offset, off / HOP_SEC, None)
+            tri_put(p_onset, on / HOP_SEC, bin_)
+            tri_put(p_offset, off / HOP_SEC, bin_)
+        else:
+            onset[i0] = 1.0
+            if offset_dilate > 0:
+                for w, j in zip(k, range(-offset_dilate, offset_dilate + 1)):
+                    idx = i_off + j
+                    if 0 <= idx < n_frames:
+                        offset[idx] = max(offset[idx], w)   # max 防相邻音叠加爆表
+            else:
+                offset[i_off] = 1.0
+            p_onset[i0, bin_] = 1.0
+            p_offset[i_off, bin_] = 1.0
+        pitch[i0:i1] = p - PITCH_LO + 1
         p_act[i0:i1, bin_] = 1.0
         dur[i0:i1] = np.log(np.maximum(
             np.arange(i1 - i0, 0, -1, dtype=np.float32), 1.0))
@@ -215,11 +238,14 @@ class SynthVocalDataset(Dataset):
 
     def __init__(self, data_dir: str | Path, ids: list[str],
                  use_mix: bool = False, mel_device: str = "cpu",
-                 offset_dilate: int = 0):
+                 offset_dilate: int = 0, reg_target: bool = False,
+                 frontend: str = "mel"):
         self.root = Path(data_dir)
         self.use_mix = use_mix
         self.mel_device = mel_device
         self.offset_dilate = offset_dilate
+        self.reg_target = reg_target
+        self.frontend = frontend
         by_id = {m["id"]: m for m in load_manifest(data_dir)}
         self.items: list[dict] = []
         for i in ids:
@@ -252,10 +278,17 @@ class SynthVocalDataset(Dataset):
         tgt = frame_targets(m["notes"], vib, mel.shape[0],
                             vowel_onsets=m.get("vowel_onsets"),
                             offset_dilate=self.offset_dilate,
-                            vowels=m.get("vowels"))
-        return {"id": m["id"], "mel": mel, "n_frames": mel.shape[0],
+                            vowels=m.get("vowels"),
+                            reg_target=self.reg_target)
+        item = {"id": m["id"], "mel": mel, "n_frames": mel.shape[0],
                 "vib_valid": 1.0 if has_vib else 0.0,
                 "vowel_valid": float(m.get("vowel_valid", 0)), **tgt}
+        if self.frontend == "w2v2":                       # E4：SSL 前端波形
+            from scipy.signal import resample_poly
+            w16 = resample_poly(wav, 320, 441).astype(np.float32)
+            w16 = (w16 - w16.mean()) / (w16.std() + 1e-7)  # HF processor 同款归一
+            item["wav16k"] = torch.as_tensor(w16)
+        return item
 
     @staticmethod
     def collate(batch: list[dict]) -> dict:
@@ -295,10 +328,21 @@ class SynthVocalDataset(Dataset):
             vib_valid[i] = b.get("vib_valid", 0.0)
             vowel_valid[i] = b.get("vowel_valid", 0.0)
         mask = (torch.arange(T).unsqueeze(0) < lengths.unsqueeze(1))  # (B,T)
-        return {"ids": [b["id"] for b in batch], "mel": mel, "lengths": lengths,
-                "onset": onset, "offset": offset, "pitch": pitch,
-                "vib": vib, "vowel": vowel, "mask": mask,
-                "dur": dur, "dur_mask": dur_mask,
-                "pitch_onset": p_onset, "pitch_offset": p_offset,
-                "pitch_act": p_act, "vowel_id": vowel_id,
-                "vib_valid": vib_valid, "vowel_valid": vowel_valid}
+        out = {"ids": [b["id"] for b in batch], "mel": mel, "lengths": lengths,
+               "onset": onset, "offset": offset, "pitch": pitch,
+               "vib": vib, "vowel": vowel, "mask": mask,
+               "dur": dur, "dur_mask": dur_mask,
+               "pitch_onset": p_onset, "pitch_offset": p_offset,
+               "pitch_act": p_act, "vowel_id": vowel_id,
+               "vib_valid": vib_valid, "vowel_valid": vowel_valid}
+        if any("wav16k" in b for b in batch):             # E4：SSL 前端
+            L16 = max(len(b["wav16k"]) for b in batch if "wav16k" in b)
+            wav16k = torch.zeros(B, L16)
+            wav16k_lengths = torch.zeros(B, dtype=torch.long)
+            for i, b in enumerate(batch):
+                if "wav16k" in b:
+                    wav16k[i, :len(b["wav16k"])] = b["wav16k"]
+                    wav16k_lengths[i] = len(b["wav16k"])
+            out["wav16k"] = wav16k
+            out["wav16k_lengths"] = wav16k_lengths
+        return out
