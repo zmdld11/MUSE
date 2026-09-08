@@ -3,7 +3,8 @@
 ## 定位
 
 本仓库 = **聆谱 MUSE 识谱系统**（开源、公开）。论文与研究线在私有工作区
-`D:\program_project\VocalTest`（工作规则见其 AGENTS.md，开工先读那边看板）。
+`D:\program_project\VocalTest`（工作规则见其 AGENTS.md，开工先读那边
+HANDOFF.md 交接文档）。
 
 ## 工作流
 
@@ -14,8 +15,10 @@
 
 ## 铁律（违反=事故）
 
-1. git：**当天改动当天 commit**（2026-09-04 用户授权；跨天未提交修改曾整块丢失）；push=对外发布，默认留给用户；tag/Release 等用户指令
+1. git：**当天改动当天 commit，commit 后直接 push origin**（push 授权 2026-09-08；
+   跨天未提交修改曾整块丢失）；tag/Release 仍等用户指令
 2. 本机 python = 项目根 `env/python.exe`，且 cwd 必须在项目根（相对路径锚点）
 3. 服务器只动 `~/zmdld11`；大上传前 `df -h` 现查；删任何东西先报清单等用户点头
 4. 公开仓库只放识谱系统：研究产物（新脚本/权重/记录）一律不 `git add`，
-   `.gitignore` 已隔离 `score_extraction/{eval,train 研究部分,model}`
+   `.gitignore` 已隔离 `score_extraction/{eval,train 研究部分,model}`；
+   研究数字/内容绝不进本仓（commit、issue 一律不进）
