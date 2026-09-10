@@ -2,16 +2,20 @@
 
 ## 定位
 
-本仓库 = **聆谱 MUSE 识谱系统**（开源、公开）。论文与研究线在私有工作区
-`D:\program_project\VocalTest`（工作规则见其 AGENTS.md，开工先读那边
-HANDOFF.md 交接文档）。
+本仓库 = **聆谱 MUSE 识谱系统**（开源、公开）。研究线两个私有仓（2026-09-10 重组）：
+
+- `D:\program_project\VV-SVT` — VV-SVT 研究仓：实验台账（issue 板）+ 实验记录 +
+  研究代码快照（开工先读那边 HANDOFF.md）
+- `D:\program_project\VV-SVT-Paper` — 论文写作与投稿、调研与选题、文献库
 
 ## 工作流
 
-- 系统改动照旧：改完留工作区，**不 git commit/push——用户自理**
-- 研究类请求（模型训练/评测/论文写作）→ 按 VocalTest/AGENTS.md 的双工作区模式执行；
-  实验代码与数据仍在 MUSE 本地目录（`score_extraction/{train,eval}/`、`data/`、`output/`
-  已脱离 git 跟踪，属私有研究资产，勿重新纳入）
+- 系统改动照旧：**当天改动当天 commit，commit 后直接 push origin**（09-08 授权；
+  tag/Release 仍等用户指令）
+- 研究类请求（模型训练/评测/论文写作）→ 按 VV-SVT/AGENTS.md 执行；
+  **live 研究代码仍在 MUSE 本地目录**（`score_extraction/{train,eval}/`、`data/`、`output/`
+  已脱离 git 跟踪，属私有研究资产，勿重新纳入）；VV-SVT 仓持有其代码快照，
+  收工跑 `VV-SVT\sync_from_muse.ps1` 同步（09-17 截稿后研究代码物理迁出 MUSE）
 
 ## 铁律（违反=事故）
 

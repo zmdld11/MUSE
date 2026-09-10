@@ -283,11 +283,17 @@ class SynthVocalDataset(Dataset):
         item = {"id": m["id"], "mel": mel, "n_frames": mel.shape[0],
                 "vib_valid": 1.0 if has_vib else 0.0,
                 "vowel_valid": float(m.get("vowel_valid", 0)), **tgt}
-        if self.frontend == "w2v2":                       # E4：SSL 前端波形
+        if self.frontend in ("w2v2", "mert"):               # E4/EM：SSL 前端波形
             from scipy.signal import resample_poly
-            w16 = resample_poly(wav, 320, 441).astype(np.float32)
+            # 源恒为 22050（SR 断言）：w2v2→16k 用 320/441，MERT→24k 用 160/147
+            up, dn = (160, 147) if self.frontend == "mert" else (320, 441)
+            w16 = resample_poly(wav, up, dn).astype(np.float32)  # →24k / →16k
             w16 = (w16 - w16.mean()) / (w16.std() + 1e-7)  # HF processor 同款归一
-            item["wav16k"] = torch.as_tensor(w16)
+            item["wav16k"] = torch.as_tensor(w16)          # 键名沿用（SSL 波形通用）
+        elif self.frontend == "melrof":                     # D线：分离骨干 44.1k
+            from scipy.signal import resample_poly
+            w44 = resample_poly(wav, 2, 1).astype(np.float32)   # 22050→44100
+            item["wav16k"] = torch.as_tensor(w44)           # 不归一化（分离器原始尺度）
         return item
 
     @staticmethod
