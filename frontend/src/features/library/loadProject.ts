@@ -10,6 +10,7 @@ import {
   gmFamily,
 } from "@/shared/theme/instrumentColors";
 import {
+  type DirScan,
   isAudioFilename,
   isTauri,
   pickDirectory,
@@ -182,19 +183,27 @@ async function buildAndLoad(raw: RawProject): Promise<Project> {
 export async function openDirectoryProject(): Promise<void> {
   const dir = await pickDirectory();
   if (!dir) return;
-  const scan = await tauriScanDir(dir);
-  if (!scan.audio && scan.mids.length === 0) {
+  await loadDirectoryProject(dir);
+}
+
+/** 按已知目录路径装载（「打开目录」与窗口拖入文件夹共用；scan 可省略内查） */
+export async function loadDirectoryProject(
+  dir: string,
+  scan?: DirScan,
+): Promise<void> {
+  const s = scan ?? (await tauriScanDir(dir));
+  if (!s.audio && s.mids.length === 0) {
     usePlayerStore.getState().setLoading(null);
     throw new Error("目录里没找到音频或 MIDI 文件");
   }
   const name = dir.split(/[\\/]/).pop() ?? dir;
   const raw: RawProject = { name, mids: [], };
-  if (scan.audio) raw.audioBytes = await tauriReadBytes(scan.audio);
-  for (const m of scan.mids) {
+  if (s.audio) raw.audioBytes = await tauriReadBytes(s.audio);
+  for (const m of s.mids) {
     raw.mids.push({ name: m.split(/[\\/]/).pop() ?? m, bytes: await tauriReadBytes(m) });
   }
-  if (scan.info) {
-    const infoBytes = await tauriReadBytes(scan.info);
+  if (s.info) {
+    const infoBytes = await tauriReadBytes(s.info);
     raw.infoText = new TextDecoder().decode(infoBytes);
   }
   // 记谱层产物（管线 notation/ 目录，缺失不致命）

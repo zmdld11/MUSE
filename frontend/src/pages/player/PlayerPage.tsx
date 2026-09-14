@@ -84,6 +84,8 @@ function EmptyState({
             选择管线输出目录（含 .mid 与音频）或音频文件夹
             <br />
             选音频时可同选同名 .lrc（人声出歌词五线谱/简谱）
+            <br />
+            也可以直接把 音频 / .mid 产物 / 文件夹 拖进窗口
           </p>
         </div>
         <div className="flex items-center gap-2">

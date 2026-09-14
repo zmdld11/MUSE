@@ -1,5 +1,5 @@
-import { useEffect } from "react";
-import { Check, Loader2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Check, FileAudio, Loader2 } from "lucide-react";
 import { usePlayerStore, visibleTracks } from "@/entities/project/store";
 import { audioEngine } from "@/features/playback/audioEngine";
 import { midiEngine } from "@/features/playback/midiEngine";
@@ -9,6 +9,7 @@ import {
   seekBy,
   togglePlay,
 } from "@/features/playback/control";
+import { installDragDrop } from "@/features/library/dragDrop";
 import { TransportBar } from "@/widgets/transport-bar/TransportBar";
 import { InstrumentPanel } from "@/widgets/instrument-panel/InstrumentPanel";
 import { PlayerPage } from "@/pages/player/PlayerPage";
@@ -19,6 +20,10 @@ export default function App() {
   const viewMode = usePlayerStore((s) => s.viewMode);
   const project = usePlayerStore((s) => s.project);
   const theme = usePlayerStore((s) => s.theme);
+  const [dropActive, setDropActive] = useState(false);
+
+  // 窗口拖入装载（issue #1）：音频±lrc→一键管线；mid 产物/文件夹→直接装载
+  useEffect(() => installDragDrop(setDropActive), []);
 
   // 主题已由 store.setTheme 落到 documentElement（先 DOM 后渲染，Canvas 读变量才是新值）
   useEffect(() => {
@@ -80,6 +85,24 @@ export default function App() {
         </main>
       </div>
       <GlobalOverlays />
+      {dropActive && <DropOverlay />}
+    </div>
+  );
+}
+
+/** 拖入悬停反馈：pointer-events-none，不拦截 drop 本身 */
+function DropOverlay() {
+  return (
+    <div className="pointer-events-none fixed inset-0 z-[60] flex items-center justify-center bg-accent/10 backdrop-blur-[2px]">
+      <div className="rounded-2xl border-2 border-dashed border-accent/70 bg-surface-1/90 px-10 py-8 text-center shadow-2xl">
+        <FileAudio className="mx-auto h-8 w-8 text-accent" />
+        <p className="mt-3 text-sm font-medium text-content-1">松开以装载</p>
+        <p className="mt-1 text-xs leading-relaxed text-content-2">
+          音频（可带 .lrc）→ 一键转写
+          <br />
+          .mid 产物 / 文件夹 → 直接装载
+        </p>
+      </div>
     </div>
   );
 }
