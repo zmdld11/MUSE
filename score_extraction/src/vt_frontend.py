@@ -11,7 +11,8 @@ filter_breath_notes / align_chars / split_melisma / fill）全部复用。
 
 推理：vocals stem → 16k（w2v2 前端输入，帧级标准化）→ VocalTowerSSL
 三塔 onset/offset/pitch → decode_notes_tower → 音域门 40-84 → +30ms。
-全曲一次前向（w2v2-large 显存 ~6.5G 档：空闲不足自动落 CPU）。
+超 90s 长曲自动滑窗（90s 窗 + 2s 重叠均值；w2v2 显存 ~6.5G 档，空闲不足
+自动落 CPU）。
 MUSE_VT_CKPT 可换任意塔式 ckpt（结构从 ck["args"] 自描述恢复；
 runtime/vt/ 是推理代码部署副本，训练侧在姊妹仓 VV-SVT）。
 """
@@ -113,21 +114,59 @@ def _load():
                 device)
 
 
+# 滑窗推理（2026-09-14 Everlasting 段错误教训：w2v2 全曲前向在 ~5min+ 曲
+# 上爆显存=原生段错误不抛异常；90s 窗 + 2s 重叠均值，与 m3 前端同款）
+_WIN_S = 90.0
+_OVL_S = 2.0
+
+
 @torch.no_grad()
 def _forward(wav22: np.ndarray) -> dict:
-    """wav22 = 22.05k mono float32 → 全曲一次前向，返回 numpy 概率 dict。"""
+    """wav22 = 22.05k mono float32 → 前向（超窗自动滑窗拼接），返回 numpy dict。"""
     from scipy.signal import resample_poly
     model, device = _INS["model"], _INS["device"]
-    w16 = resample_poly(wav22, 320, 441).astype(np.float32)   # → 16k
-    w16 = (w16 - w16.mean()) / (w16.std() + 1e-7)
-    o = model(torch.as_tensor(w16, device=device).unsqueeze(0),
-              torch.tensor([len(w16)], device=device),
-              out_frames=[1 + len(wav22) // 220])
-    sig = lambda x: torch.sigmoid(x).float().cpu().numpy()
-    return {k: (sig(v[0]) if k in ("onset", "offset", "onset_r", "offset_r",
-                                   "pitch", "vowel")
-                else v[0].float().cpu().numpy())
-            for k, v in o.items()}
+    hop = 220                      # ds.SR 22050 的帧 hop
+    win = int(_WIN_S * _INS["ds"].SR)
+    ovl = int(_OVL_S * _INS["ds"].SR)
+
+    def _one(seg22: np.ndarray) -> dict:
+        w16 = resample_poly(seg22, 320, 441).astype(np.float32)   # → 16k
+        w16 = (w16 - w16.mean()) / (w16.std() + 1e-7)
+        o = model(torch.as_tensor(w16, device=device).unsqueeze(0),
+                  torch.tensor([len(w16)], device=device),
+                  out_frames=[1 + len(seg22) // 220])
+        sig = lambda x: torch.sigmoid(x).float().cpu().numpy()
+        return {k: (sig(v[0]) if k in ("onset", "offset", "onset_r", "offset_r",
+                                       "pitch", "vowel")
+                    else v[0].float().cpu().numpy())
+                for k, v in o.items()}
+
+    if len(wav22) <= win:
+        return _one(wav22)
+
+    # 滑窗：帧级累加取均值，重叠区掩盖 GRU 窗界上下文重置
+    T = 1 + len(wav22) // hop
+    acc: dict = {}
+    cnt = np.zeros(T, dtype=np.float32)
+    start = 0
+    while start < len(wav22):
+        end = min(start + win, len(wav22))
+        out = _one(wav22[start:end])
+        f0 = int(round(start / hop))
+        n = min(len(out["onset"]), T - f0)
+        for k, v in out.items():
+            if len(v) > n:                 # 窗尾帧数对齐截断
+                v = v[:n]
+            if k not in acc:
+                acc[k] = np.zeros((T,) + np.asarray(v).shape[1:],
+                                  dtype=np.float64)
+            acc[k][f0:f0 + n] += v
+        cnt[f0:f0 + n] += 1.0
+        start = end if end == len(wav22) else end - ovl
+
+    w = np.maximum(cnt, 1.0)
+    return {k: (v / w[:, None] if v.ndim > 1 else v / w).astype(np.float32)
+            for k, v in acc.items()}
 
 
 def transcribe_vt(audio_path: str,
