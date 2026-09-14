@@ -2201,8 +2201,10 @@ def _post_export_gate(xml_paths: list[str], loud: bool = True) -> dict:
         # 注意：不能 `from eval.validate_musicxml import ...`——eval/ 目录下的
         # eval.py 同名模块会在 sys.path[0]=脚本目录时遮蔽 eval 包（实测踩坑），
         # 按文件路径直接加载校验器，免疫任何打包/路径环境。
+        # 校验器部署副本在 runtime/notation/（训练侧原件随 eval/ 迁 MUSE\train\）。
         import importlib.util as _ilu
-        _vp = Path(__file__).resolve().parents[1] / "eval" / "validate_musicxml.py"
+        _vp = Path(__file__).resolve().parents[1] / "runtime" / "notation" / \
+            "validate_musicxml.py"
         _spec = _ilu.spec_from_file_location("_muse_musicxml_validator", _vp)
         _mod = _ilu.module_from_spec(_spec)
         _spec.loader.exec_module(_mod)
@@ -2219,7 +2221,7 @@ def _post_export_gate(xml_paths: list[str], loud: bool = True) -> dict:
             summary["detail"][os.path.basename(p)] = n
             if n and loud:
                 logger.error("[notation] 导出校验失败 %s: %d 处问题，"
-                             "跑 eval/validate_musicxml.py %s 看明细",
+                             "跑 runtime/notation/validate_musicxml.py %s 看明细",
                              os.path.basename(p), n, p)
         except Exception:
             logger.warning("[notation] 校验 %s 异常", p, exc_info=True)

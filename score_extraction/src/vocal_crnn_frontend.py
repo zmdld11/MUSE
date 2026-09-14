@@ -42,7 +42,7 @@ def _load():
     mods = {}
     for name, fname in (("ds", "dataset"), ("mdl", "model"), ("dec", "decode")):
         spec = ilu.spec_from_file_location(
-            f"_vcfe_{fname}", _SE / "train" / "vocal_crnn" / f"{fname}.py")
+            f"_vcfe_{fname}", _SE / "runtime" / "vocal_crnn" / f"{fname}.py")
         mod = ilu.module_from_spec(spec)
         spec.loader.exec_module(mod)
         mods[name] = mod

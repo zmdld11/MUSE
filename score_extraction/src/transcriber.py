@@ -12,6 +12,21 @@ logger = logging.getLogger(__name__)
 
 _model = None
 
+# 自训钢琴模型代码的部署副本（训练侧原件在 MUSE\train\piano_legacy\）
+_PIANO_MODS: dict = {}
+
+
+def _piano_mod(name: str):
+    if name not in _PIANO_MODS:
+        import importlib.util as ilu
+        from pathlib import Path
+        _p = Path(__file__).resolve().parents[1] / "runtime" / "piano" / f"{name}.py"
+        spec = ilu.spec_from_file_location(f"_tp_{name}", _p)
+        m = ilu.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        _PIANO_MODS[name] = m
+    return _PIANO_MODS[name]
+
 
 def _load_model():
     global _model
@@ -27,12 +42,12 @@ def _load_model():
         return None
 
     state = torch.load(model_path, map_location="cpu", weights_only=True)
-    from train.model_v4 import OnsetsFramesV4
+    OnsetsFramesV4 = _piano_mod("model_v4").OnsetsFramesV4
     if any(k.startswith("transformer.") for k in state):
         _model = OnsetsFramesV4(n_mels=229, n_midi=88, backend="transformer")
         logger.info("V4 Transformer model detected")
     else:
-        from train.model import OnsetsAndFrames
+        OnsetsAndFrames = _piano_mod("model").OnsetsAndFrames
         has_offset = any(k.startswith("offset_head.") for k in state)
         _model = OnsetsAndFrames(n_mels=229, n_midi=88, include_offset=has_offset)
         logger.info(f"VER2/3 LSTM model detected (offset_head={has_offset})")
@@ -64,7 +79,7 @@ def _ours_inference(model, audio_path: str) -> dict:
     mel_db = librosa.power_to_db(mel, ref=np.max)
     mel_db = np.clip((mel_db + 80) / 80, -1, 1)
 
-    from train.model_v4 import OnsetsFramesV4
+    OnsetsFramesV4 = _piano_mod("model_v4").OnsetsFramesV4
     spec = torch.from_numpy(mel_db).float().unsqueeze(0).unsqueeze(0).to(device)
     if isinstance(model, OnsetsFramesV4):
         # V4 Transformer: 位置编码上限 2048 帧 + 注意力 O(T^2), 必须分窗推理
