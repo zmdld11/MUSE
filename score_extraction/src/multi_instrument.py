@@ -298,11 +298,15 @@ def run_multi_instrument(audio_path: str, output_dir: str, bpm: float,
                 line_starts = ([l["t0"] for l in lrc["lyric_lines"]]
                                if lrc else None)
                 # 人声骨干可换：MUSE_VOCAL_ENGINE=m3 → 自研 VocalCRNN(m3st500，
-                # 元音头切分)；默认 some。下游增强层两骨干共用。
+                # 元音头切分)；vt → VV-SVT 塔式（论文部署配置）；默认 some。
+                # 下游增强层各骨干共用。
                 _vocal_engine = os.environ.get("MUSE_VOCAL_ENGINE", "some")
                 if _vocal_engine == "m3":
                     from src.vocal_crnn_frontend import transcribe_m3
                     r = transcribe_m3(vocals_wav, line_boundaries=line_starts)
+                elif _vocal_engine == "vt":
+                    from src.vt_frontend import transcribe_vt
+                    r = transcribe_vt(vocals_wav, line_boundaries=line_starts)
                 else:
                     r = transcribe_some(vocals_wav, line_boundaries=line_starts)
                 if r["note_count"] >= MIN_CLASS_NOTES:
