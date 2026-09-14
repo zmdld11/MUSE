@@ -382,8 +382,8 @@ def run_multi_instrument(audio_path: str, output_dir: str, bpm: float,
                     if n_vib:
                         logger.info("  [multi] 技巧标注：vibrato %d", n_vib)
             except Exception:
-                logger.warning("  [multi] SOME 人声转写失败，回退 raw 直推",
-                               exc_info=True)
+                logger.warning("  [multi] 人声引擎(%s)转写失败，回退 raw 直推",
+                               _vocal_engine, exc_info=True)
         else:
             logger.warning("  [multi] MelBand 分离未产出，人声回退 raw 直推")
     if vocal_notes is not None:
